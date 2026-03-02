@@ -1,0 +1,160 @@
+📁 STRUCTURE COMPLÈTE DU PROJET PFE
+=====================================
+
+pfe-ai-test-automation/
+│
+├── 📁 agent-ia-server/              # ⭐ PHASE 1: Agent IA Principal
+│   ├── 📄 main.py                   # FastAPI server principal
+│   ├── 📄 groq_client.py            # Client Groq API
+│   ├── 📄 config.py                 # Configuration (API keys, etc.)
+│   ├── 📄 requirements.txt          # Dépendances Python
+│   │
+│   ├── 📁 api/                      # Routes API
+│   │   ├── 📄 __init__.py
+│   │   ├── 📄 corrections.py        # Endpoints corrections
+│   │   ├── 📄 analysis.py           # Endpoints analyse
+│   │   └── 📄 webhooks.py           # Webhooks Jenkins
+│   │
+│   ├── 📁 services/                 # Logique métier
+│   │   ├── 📄 __init__.py
+│   │   ├── 📄 test_analyzer.py      # Analyse échecs tests
+│   │   ├── 📄 correction_generator.py # Génération corrections
+│   │   └── 📄 git_operations.py     # Opérations Git
+│   │
+│   ├── 📁 models/                   # Modèles de données
+│   │   ├── 📄 __init__.py
+│   │   ├── 📄 test_failure.py       # Modèle échec test
+│   │   ├── 📄 correction.py         # Modèle correction
+│   │   └── 📄 review.py             # Modèle révision
+│   │
+│   ├── 📁 utils/                    # Utilitaires
+│   │   ├── 📄 __init__.py
+│   │   ├── 📄 logger.py             # Logging
+│   │   ├── 📄 cache.py              # Cache simple
+│   │   └── 📄 rate_limiter.py       # Gestion rate limits
+│   │
+│   └── 📁 tests/                    # Tests unitaires
+│       ├── 📄 test_groq_client.py
+│       ├── 📄 test_analyzer.py
+│       └── 📄 test_api.py
+│
+├── 📁 rag-system/                   # ⭐ PHASE 2: Système RAG
+│   ├── 📄 rag_manager.py            # Gestionnaire RAG principal
+│   ├── 📄 indexer.py                # Indexation du code
+│   ├── 📄 query_engine.py           # Moteur de recherche
+│   ├── 📄 embeddings.py             # Gestion embeddings
+│   ├── 📄 chunker.py                # Chunking intelligent
+│   ├── 📄 requirements.txt
+│   │
+│   ├── 📁 data/                     # Données RAG
+│   │   ├── 📁 chroma_db/            # Base vectorielle ChromaDB
+│   │   ├── 📁 source_code/          # Code source indexé
+│   │   └── 📁 test_files/           # Tests indexés
+│   │
+│   └── 📁 scripts/                  # Scripts utilitaires
+│       ├── 📄 index_project.py      # Indexer projet complet
+│       ├── 📄 update_index.py       # Mise à jour index
+│       └── 📄 query_test.py         # Tester queries
+│
+├── 📁 jenkins-integration/          # ⭐ PHASE 3: Intégration Jenkins
+│   ├── 📄 Jenkinsfile               # Pipeline Jenkins modifié
+│   ├── 📄 webhook_handler.py        # Handler webhook
+│   ├── 📄 log_parser.py             # Parser logs Jenkins
+│   ├── 📄 jenkins_config.groovy     # Configuration Jenkins
+│   │
+│   └── 📁 scripts/
+│       ├── 📄 trigger_analysis.sh   # Script trigger analyse
+│       └── 📄 send_notification.sh  # Notifications
+│
+├── 📁 developer-ui/                 # ⭐ PHASE 4: Interface Développeur
+│   ├── 📄 package.json              # Dépendances npm
+│   ├── 📄 index.html                # Page principale
+│   │
+│   ├── 📁 src/
+│   │   ├── 📄 App.jsx               # Application React
+│   │   ├── 📄 api.js                # Client API
+│   │   │
+│   │   ├── 📁 components/
+│   │   │   ├── 📄 CorrectionCard.jsx    # Carte correction
+│   │   │   ├── 📄 DiffViewer.jsx        # Visualisation diff
+│   │   │   ├── 📄 ApprovalButtons.jsx   # Boutons action
+│   │   │   └── 📄 ResultsPanel.jsx      # Panneau résultats
+│   │   │
+│   │   └── 📁 pages/
+│   │       ├── 📄 Dashboard.jsx         # Dashboard principal
+│   │       ├── 📄 ReviewPage.jsx        # Page révision
+│   │       └── 📄 ResultsPage.jsx       # Page résultats
+│   │
+│   └── 📁 public/
+│       ├── 📄 styles.css
+│       └── 📁 assets/
+│
+├── 📁 shared/                       # Code partagé
+│   ├── 📄 constants.py              # Constantes globales
+│   ├── 📄 schemas.py                # Schémas de données
+│   └── 📄 validators.py             # Validateurs
+│
+├── 📁 docs/                         # Documentation
+│   ├── 📄 ARCHITECTURE.md           # Architecture système
+│   ├── 📄 API.md                    # Documentation API
+│   ├── 📄 SETUP.md                  # Instructions setup
+│   ├── 📄 RAG_SYSTEM.md             # Documentation RAG
+│   ├── 📁 diagrams/                 # Diagrammes
+│   │   ├── 📄 architecture.png
+│   │   ├── 📄 sequence_diagram.png
+│   │   └── 📄 class_diagram.png
+│   │
+│   └── 📁 use_cases/                # Cas d'utilisation
+│       └── 📄 Cas_Utilisation_Final_Sans_MCP.docx
+│
+├── 📁 config/                       # Configurations
+│   ├── 📄 .env.example              # Variables d'environnement exemple
+│   ├── 📄 logging_config.yaml       # Config logging
+│   └── 📄 rag_config.yaml           # Config RAG
+│
+├── 📁 scripts/                      # Scripts utilitaires globaux
+│   ├── 📄 setup.sh                  # Setup automatique
+│   ├── 📄 start_services.sh         # Démarrer tous les services
+│   ├── 📄 run_tests.sh              # Exécuter tests
+│   └── 📄 deploy.sh                 # Déploiement
+│
+├── 📁 database/                     # Base de données (optionnel)
+│   ├── 📄 schema.sql                # Schéma DB
+│   └── 📄 migrations/               # Migrations
+│
+├── 📁 logs/                         # Logs système
+│   ├── 📄 agent_ia.log
+│   ├── 📄 rag.log
+│   └── 📄 jenkins.log
+│
+├── 📄 .gitignore                    # Git ignore
+├── 📄 .env                          # Variables d'environnement (ne pas commit!)
+├── 📄 README.md                     # README principal
+├── 📄 docker-compose.yml            # Docker (optionnel)
+└── 📄 Makefile                      # Commandes rapides
+
+=====================================
+TOTAL: ~60 fichiers organisés
+=====================================
+
+ORDRE D'IMPLÉMENTATION:
+=======================
+
+✅ PHASE 1 (2-3 jours):
+   agent-ia-server/ (base)
+   └── main.py, groq_client.py, config.py
+
+✅ PHASE 2 (3-4 jours):
+   rag-system/
+   └── rag_manager.py, indexer.py, query_engine.py
+
+✅ PHASE 3 (2-3 jours):
+   jenkins-integration/
+   └── Jenkinsfile, webhook_handler.py
+
+✅ PHASE 4 (2-3 jours):
+   developer-ui/
+   └── Dashboard, ReviewPage
+
+✅ PHASE 5 (1 semaine):
+   Tests + Documentation + Raffinement

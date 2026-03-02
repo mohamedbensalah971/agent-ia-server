@@ -1,0 +1,36 @@
+# ======================================
+# AGENT IA SERVER - DEPENDENCIES
+# ======================================
+
+# Web Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+pydantic-settings==2.1.0
+
+# Groq API Client
+groq==0.4.2
+httpx==0.26.0
+
+# Utilities
+python-dotenv==1.0.0
+python-multipart==0.0.6
+
+# Git Operations
+gitpython==3.1.41
+
+# Logging
+loguru==0.7.2
+
+# Cache
+cachetools==5.3.2
+
+# Testing (for future)
+pytest==7.4.4
+pytest-asyncio==0.23.3
+
+# Optional: Rate limiting
+slowapi==0.1.9
+
+# Optional: CORS
+python-jose[cryptography]==3.3.0
