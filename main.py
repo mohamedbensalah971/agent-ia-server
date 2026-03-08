@@ -1,6 +1,6 @@
 """
 AI Agent Server - Main FastAPI Application
-Handles test failure analysis and correction generation
+Supports both direct Groq calls and LangGraph workflow
 """
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
@@ -14,6 +14,17 @@ import sys
 
 from config import settings, validate_settings
 from groq_client import get_groq_client
+
+# LangGraph imports
+try:
+    from langgraph_agent.graph import create_workflow
+    from langgraph_agent.state import AgentState
+    LANGGRAPH_AVAILABLE = True
+    logger.info("✅ LangGraph modules loaded successfully")
+except ImportError as e:
+    LANGGRAPH_AVAILABLE = False
+    logger.warning(f"⚠️ LangGraph not available: {e}")
+    logger.warning("   Install with: pip install langgraph langchain langchain-groq")
 
 # Configure logging
 logger.remove()
@@ -29,7 +40,7 @@ logger.add(
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
-    description="AI-powered test automation and correction system"
+    description="AI-powered test automation and correction system with LangGraph support"
 )
 
 # CORS middleware
@@ -81,6 +92,24 @@ class CorrectionResponse(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
 
 
+class LangGraphCorrectionResponse(BaseModel):
+    """Response model for LangGraph workflow correction"""
+    success: bool
+    correction_id: str
+    test_file: str
+    test_name: str
+    error_type: Optional[str] = None
+    proposed_fix: Optional[str] = None
+    explanation: Optional[str] = None
+    confidence_score: Optional[float] = None
+    is_valid: Optional[bool] = None
+    validation_errors: Optional[List[str]] = None
+    tokens_used: int
+    processing_time: float
+    steps_completed: List[str]
+    timestamp: datetime = Field(default_factory=datetime.now)
+
+
 class ApprovalRequest(BaseModel):
     """Request model for correction approval"""
     correction_id: str
@@ -93,6 +122,7 @@ class HealthResponse(BaseModel):
     status: str
     version: str
     groq_api: str
+    langgraph_available: bool
     tokens_available: Dict[str, Any]
 
 
@@ -113,6 +143,12 @@ async def startup_event():
         # Initialize Groq client
         groq_client = get_groq_client()
         logger.info("✅ Groq client initialized")
+        
+        # Check LangGraph availability
+        if LANGGRAPH_AVAILABLE:
+            logger.info("✅ LangGraph workflow available")
+        else:
+            logger.warning("⚠️ LangGraph not installed - only basic endpoint available")
         
         # Log configuration
         logger.info(f"Model: {settings.GROQ_MODEL}")
@@ -148,7 +184,11 @@ async def root():
         "message": f"Welcome to {settings.APP_NAME}",
         "version": settings.APP_VERSION,
         "docs": "/docs",
-        "health": "/health"
+        "health": "/health",
+        "endpoints": {
+            "basic": "/analyze-failure",
+            "langgraph": "/analyze-failure-langgraph" if LANGGRAPH_AVAILABLE else "Not available"
+        }
     }
 
 
@@ -165,6 +205,7 @@ async def health_check():
         status="healthy",
         version=settings.APP_VERSION,
         groq_api="connected",
+        langgraph_available=LANGGRAPH_AVAILABLE,
         tokens_available={
             "tokens_used_today": stats["tokens_used_day"],
             "tokens_remaining_today": stats["rate_limit_day"] - stats["tokens_used_day"],
@@ -176,11 +217,12 @@ async def health_check():
 @app.post("/analyze-failure", response_model=CorrectionResponse, tags=["Corrections"])
 async def analyze_test_failure(request: TestFailureRequest):
     """
-    Analyze a failing test and generate correction
+    Analyze a failing test and generate correction (Basic endpoint)
     
-    This is the main endpoint called by Jenkins or manually
+    This is the simple endpoint using direct Groq calls (Phase 1)
+    For advanced workflow, use /analyze-failure-langgraph
     """
-    logger.info(f"📥 Received analysis request for test: {request.test_name}")
+    logger.info(f"📥 [BASIC] Received analysis request for test: {request.test_name}")
     logger.debug(f"Test file: {request.test_file}")
     
     try:
@@ -191,7 +233,7 @@ async def analyze_test_failure(request: TestFailureRequest):
             test_code=request.test_code,
             error_logs=request.error_logs,
             source_code=request.source_code,
-            context=None  # RAG context will be added in Phase 2
+            context=None  # RAG context will be added in Phase 3
         )
         
         if not result["success"]:
@@ -222,6 +264,94 @@ async def analyze_test_failure(request: TestFailureRequest):
     except Exception as e:
         logger.error(f"❌ Unexpected error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/analyze-failure-langgraph", response_model=LangGraphCorrectionResponse, tags=["Corrections"])
+async def analyze_failure_langgraph(request: TestFailureRequest):
+    """
+    Analyze a failing test using LangGraph workflow (Advanced endpoint - Phase 2)
+    
+    This endpoint uses a sophisticated state machine workflow with:
+    - Step-by-step analysis
+    - RAG context integration (Phase 3)
+    - Validation and confidence scoring
+    - Full traceability
+    
+    Requires: LangGraph, LangChain, langchain-groq
+    Install: pip install langgraph langchain langchain-groq
+    """
+    if not LANGGRAPH_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="LangGraph not available. Install with: pip install langgraph langchain langchain-groq"
+        )
+    
+    logger.info(f"📥 [LANGGRAPH] Received analysis request for test: {request.test_name}")
+    logger.debug(f"Test file: {request.test_file}")
+    
+    try:
+        # Create the workflow
+        logger.info("🔄 Creating LangGraph workflow...")
+        workflow = create_workflow(settings.GROQ_API_KEY)
+        
+        # Prepare initial state
+        initial_state: AgentState = {
+            "test_file": request.test_file,
+            "test_name": request.test_name,
+            "test_code": request.test_code,
+            "error_logs": request.error_logs,
+            "error_type": None,
+            "error_message": None,
+            "stack_trace": None,
+            "similar_tests": None,
+            "similar_fixes": None,
+            "project_conventions": None,
+            "proposed_fix": None,
+            "explanation": None,
+            "confidence_score": None,
+            "is_valid_kotlin": None,
+            "validation_errors": None,
+            "tokens_used": 0,
+            "processing_time": 0.0,
+            "steps_completed": []
+        }
+        
+        # Execute the workflow
+        logger.info("▶️ Executing LangGraph workflow...")
+        result = workflow.invoke(initial_state)
+        
+        # Generate unique correction ID
+        correction_id = f"lg_corr_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        logger.info(f"✅ LangGraph workflow completed: {correction_id}")
+        logger.info(f"   Steps completed: {len(result['steps_completed'])}")
+        logger.info(f"   Error type: {result['error_type']}")
+        logger.info(f"   Confidence: {result['confidence_score']}")
+        logger.info(f"   Valid Kotlin: {result['is_valid_kotlin']}")
+        logger.info(f"   Processing time: {result['processing_time']:.2f}s")
+        logger.info(f"   Tokens used: {result['tokens_used']}")
+        
+        # Return the result
+        return LangGraphCorrectionResponse(
+            success=True,
+            correction_id=correction_id,
+            test_file=result["test_file"],
+            test_name=result["test_name"],
+            error_type=result["error_type"],
+            proposed_fix=result["proposed_fix"],
+            explanation=result["explanation"],
+            confidence_score=result["confidence_score"],
+            is_valid=result["is_valid_kotlin"],
+            validation_errors=result.get("validation_errors", []),
+            tokens_used=result["tokens_used"],
+            processing_time=result["processing_time"],
+            steps_completed=result["steps_completed"]
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ LangGraph workflow error: {e}")
+        logger.exception("Full traceback:")
+        raise HTTPException(status_code=500, detail=f"LangGraph workflow failed: {str(e)}")
 
 
 @app.post("/approve-correction", tags=["Corrections"])
@@ -282,7 +412,7 @@ async def get_statistics():
         "system": {
             "version": settings.APP_VERSION,
             "model": settings.GROQ_MODEL,
-            "uptime": "TODO"  # Add uptime tracking
+            "langgraph_available": LANGGRAPH_AVAILABLE
         }
     }
 
@@ -297,7 +427,7 @@ async def jenkins_webhook(payload: Dict[Any, Any]):
     logger.info("🔔 Jenkins webhook received")
     logger.debug(f"Payload: {payload}")
     
-    # TODO: Phase 3 - Parse Jenkins payload and trigger analysis
+    # TODO: Phase 4 - Parse Jenkins payload and trigger analysis
     
     return {
         "success": True,
