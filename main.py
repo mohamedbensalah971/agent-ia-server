@@ -448,3 +448,24 @@ if __name__ == "__main__":
         reload=settings.DEBUG,
         log_level=settings.LOG_LEVEL.lower()
     )
+
+@app.get("/rag/stats", tags=["RAG"])
+async def get_rag_stats():
+    """
+    Get RAG system statistics
+    Returns number of indexed tests, fixes, and conventions
+    """
+    from rag_system.chromadb_client import get_chromadb_client
+    
+    chroma_client = get_chromadb_client()
+    stats = chroma_client.get_stats()
+    
+    return {
+        "chromadb": stats,
+        "collections": {
+            "tests": stats["tests"],
+            "fixes": stats["fixes"],
+            "conventions": stats["conventions"]
+        },
+        "total_documents": stats["total"]
+    }
