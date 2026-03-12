@@ -1,0 +1,125 @@
+{
+  "timestamp": "2026-03-09T14:03:48.337624",
+  "langgraph_results": [
+    {
+      "scenario_name": "Mock manquant - MockK",
+      "endpoint": "/analyze-failure-langgraph",
+      "success": true,
+      "processing_time": 2.28617262840271,
+      "error_type_detected": "null_pointer",
+      "error_type_expected": "NULL_POINTER",
+      "confidence_score": 0.85,
+      "tokens_used": 500,
+      "is_valid": true,
+      "has_fix": true,
+      "fix_length": 776,
+      "steps_completed": 6,
+      "timestamp": "2026-03-09T14:03:28.422054"
+    },
+    {
+      "scenario_name": "Mock non configur\u00e9 - every",
+      "endpoint": "/analyze-failure-langgraph",
+      "success": true,
+      "processing_time": 1.2218844890594482,
+      "error_type_detected": "mock_missing",
+      "error_type_expected": "MOCK_MISSING",
+      "confidence_score": 1.0,
+      "tokens_used": 500,
+      "is_valid": true,
+      "has_fix": true,
+      "fix_length": 684,
+      "steps_completed": 6,
+      "timestamp": "2026-03-09T14:03:31.645555"
+    },
+    {
+      "scenario_name": "Assertion incorrecte - assertEquals",
+      "endpoint": "/analyze-failure-langgraph",
+      "success": true,
+      "processing_time": 1.411726951599121,
+      "error_type_detected": "assertion_error",
+      "error_type_expected": "ASSERTION_ERROR",
+      "confidence_score": 0.85,
+      "tokens_used": 500,
+      "is_valid": true,
+      "has_fix": true,
+      "fix_length": 721,
+      "steps_completed": 6,
+      "timestamp": "2026-03-09T14:03:35.059764"
+    },
+    {
+      "scenario_name": "Coroutine Dispatcher manquant",
+      "endpoint": "/analyze-failure-langgraph",
+      "success": true,
+      "processing_time": 1.383471965789795,
+      "error_type_detected": "unknown",
+      "error_type_expected": "COROUTINE_DISPATCHER",
+      "confidence_score": 0.85,
+      "tokens_used": 500,
+      "is_valid": true,
+      "has_fix": true,
+      "fix_length": 704,
+      "steps_completed": 6,
+      "timestamp": "2026-03-09T14:03:38.443540"
+    },
+    {
+      "scenario_name": "Koin DI non initialis\u00e9",
+      "endpoint": "/analyze-failure-langgraph",
+      "success": true,
+      "processing_time": 1.3592188358306885,
+      "error_type_detected": "unknown",
+      "error_type_expected": "KOIN_MISSING",
+      "confidence_score": 0.85,
+      "tokens_used": 500,
+      "is_valid": true,
+      "has_fix": true,
+      "fix_length": 620,
+      "steps_completed": 6,
+      "timestamp": "2026-03-09T14:03:41.803311"
+    }
+  ],
+  "basic_results": [
+    {
+      "scenario_name": "Mock manquant - MockK",
+      "endpoint": "/analyze-failure",
+      "success": true,
+      "processing_time": 0.3209669589996338,
+      "error_type_detected": null,
+      "error_type_expected": "NULL_POINTER",
+      "confidence_score": null,
+      "tokens_used": 334,
+      "is_valid": null,
+      "has_fix": true,
+      "fix_length": 155,
+      "steps_completed": 0,
+      "timestamp": "2026-03-09T14:03:44.124739"
+    },
+    {
+      "scenario_name": "Mock non configur\u00e9 - every",
+      "endpoint": "/analyze-failure",
+      "success": true,
+      "processing_time": 0.21212148666381836,
+      "error_type_detected": null,
+      "error_type_expected": "MOCK_MISSING",
+      "confidence_score": null,
+      "tokens_used": 339,
+      "is_valid": null,
+      "has_fix": true,
+      "fix_length": 149,
+      "steps_completed": 0,
+      "timestamp": "2026-03-09T14:03:46.337175"
+    }
+  ],
+  "summary": {
+    "langgraph": {
+      "success_rate": 100.0,
+      "avg_time": 1.5324949741363525,
+      "avg_confidence": 0.8800000000000001,
+      "avg_tokens": 500.0,
+      "valid_rate": 100.0
+    },
+    "basic": {
+      "success_rate": 100.0,
+      "avg_time": 0.2665442228317261
+    }
+  }
+}

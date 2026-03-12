@@ -3,6 +3,7 @@ import time
 from typing import Dict, Any
 from langchain_groq import ChatGroq
 from langgraph_agent.state import AgentState, ErrorType
+from rag_system.retriever import get_rag_retriever
 
 class WorkflowNodes:
     """Tous les nœuds du workflow"""
@@ -13,6 +14,7 @@ class WorkflowNodes:
             temperature=0.1,
             api_key=groq_api_key
         )
+        self.rag_retriever = get_rag_retriever()
     
     def analyze_failure(self, state: AgentState) -> Dict[str, Any]:
         """Nœud 1: Analyser l'échec du test"""
@@ -66,28 +68,24 @@ class WorkflowNodes:
         }
     
     def query_rag(self, state: AgentState) -> Dict[str, Any]:
-        """Nœud 3: Requête RAG (placeholder pour Phase 3)"""
-        print("📚 Query RAG (placeholder - sera implémenté Phase 3)...")
-        
-        # Pour l'instant, retourne des exemples mockés
-        # En Phase 3, on utilisera vraiment ChromaDB
-        
-        similar_tests = [
-            {
-                "code": "MockKAnnotations.init(this)",
-                "context": "Initialisation MockK dans @Before"
-            }
-        ]
-        
+        """Nœud 3: Requête RAG - interroge ChromaDB pour du contexte réel"""
+        print("📚 Query RAG (ChromaDB)...")
+
+        context = self.rag_retriever.get_context_for_fix(
+            test_code=state["test_code"],
+            error_logs=state["error_logs"],
+            error_type=state["error_type"].value if state.get("error_type") else None
+        )
+
+        # Convert conventions list to a readable dict for the generate_fix prompt
         project_conventions = {
-            "framework": "JUnit 5",
-            "mocking": "MockK",
-            "di": "Koin",
-            "assertions": "Truth"
+            conv.get("category", "general"): conv["description"]
+            for conv in context["conventions"]
         }
-        
+
         return {
-            "similar_tests": similar_tests,
+            "similar_tests": context["similar_tests"],
+            "similar_fixes": context["similar_fixes"],
             "project_conventions": project_conventions,
             "steps_completed": state["steps_completed"] + ["query_rag"]
         }
@@ -99,6 +97,15 @@ class WorkflowNodes:
         start_time = time.time()
         
         # Construire le prompt
+        rag_context = self.rag_retriever.format_context_for_prompt({
+            "conventions": [
+                {"description": f"{cat}: {desc}"}
+                for cat, desc in state.get("project_conventions", {}).items()
+            ],
+            "similar_tests": state.get("similar_tests", []),
+            "similar_fixes": state.get("similar_fixes", []),
+        })
+
         prompt = f"""Tu es un expert en tests Kotlin Android.
 
 TEST ÉCHOUÉ:
@@ -109,11 +116,8 @@ ERREUR:
 
 TYPE D'ERREUR: {state['error_type']}
 
-CONVENTIONS PROJET:
-{state.get('project_conventions', {})}
-
-EXEMPLES SIMILAIRES:
-{state.get('similar_tests', [])}
+CONTEXTE DU PROJET (issu de la base de connaissances):
+{rag_context if rag_context else "Aucun contexte disponible"}
 
 TÂCHE:
 Génère UNIQUEMENT le code corrigé complet du test.
