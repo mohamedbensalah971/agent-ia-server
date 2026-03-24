@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     # RAG Configuration (for later integration)
     RAG_ENABLED: bool = False
     RAG_ENDPOINT: Optional[str] = "http://localhost:8001"
+    RAG_CHROMA_PERSIST_DIR: str = "./data/chromadb"
+    RAG_EMBEDDING_MODEL: str = "jinaai/jina-embeddings-v2-base-code"
+    RAG_EMBEDDING_DEVICE: str = "cpu"
     
     class Config:
         env_file = ".env"

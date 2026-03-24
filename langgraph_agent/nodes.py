@@ -77,11 +77,26 @@ class WorkflowNodes:
             error_type=state["error_type"].value if state.get("error_type") else None
         )
 
-        # Convert conventions list to a readable dict for the generate_fix prompt
-        project_conventions = {
-            conv.get("category", "general"): conv["description"]
-            for conv in context["conventions"]
-        }
+        # Convert conventions list to a readable dict for the generate_fix prompt.
+        # Some retrieval paths return `content` only (without `description`).
+        project_conventions = {}
+        for conv in context.get("conventions", []):
+            if not isinstance(conv, dict):
+                continue
+
+            category = conv.get("category") or "general"
+            description = (
+                conv.get("description")
+                or conv.get("content")
+                or (conv.get("metadata") or {}).get("description")
+                or ""
+            )
+
+            if description:
+                # Keep the richest description if the same category appears multiple times.
+                existing = project_conventions.get(category, "")
+                if len(description) > len(existing):
+                    project_conventions[category] = description
 
         return {
             "similar_tests": context["similar_tests"],

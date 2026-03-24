@@ -5,8 +5,15 @@ from langgraph.graph import StateGraph, END
 from langgraph_agent.state import AgentState
 from langgraph_agent.nodes import WorkflowNodes
 
+
+_compiled_workflow = None
+
 def create_workflow(groq_api_key: str) -> StateGraph:
     """Crée le workflow LangGraph"""
+    global _compiled_workflow
+
+    if _compiled_workflow is not None:
+        return _compiled_workflow
     
     # Initialiser les nœuds
     nodes = WorkflowNodes(groq_api_key)
@@ -31,4 +38,5 @@ def create_workflow(groq_api_key: str) -> StateGraph:
     workflow.add_edge("validate_fix", "calculate_confidence")
     workflow.add_edge("calculate_confidence", END)
     
-    return workflow.compile()
+    _compiled_workflow = workflow.compile()
+    return _compiled_workflow

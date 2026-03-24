@@ -2,10 +2,9 @@
 Indexer - RAG System
 """
 
-import os
 import re
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from loguru import logger
 
 from rag_system.chromadb_client import get_chromadb_client
@@ -53,29 +52,124 @@ class ProjectIndexer:
         return test_files
     
     def _index_test_file(self, file_path: Path):
-        """Indexe un fichier de test complet"""
+        """Indexe un fichier de test et ses chunks Kotlin (class/fun)."""
         try:
             content = file_path.read_text(encoding='utf-8', errors='ignore')
-            
-            # Indexer le fichier entier
-            test_id = f"{file_path.stem}"
-            
-            # Limiter la taille pour ChromaDB (max 1000 caractères)
-            if len(content) > 1000:
-                content = content[:1000] + "\n... (truncated)"
-            
+
+            relative_path = str(file_path.relative_to(self.project_path))
+            doc_prefix = self._safe_id(relative_path)
+            parent_id = f"{doc_prefix}__full"
+
+            # Parent document: gardé pour récupération de contexte global.
             self.chroma_client.add_test(
-                test_id=test_id,
+                test_id=parent_id,
                 test_code=content,
-                test_file=str(file_path.relative_to(self.project_path)),
+                test_file=relative_path,
                 metadata={
                     "file": file_path.name,
-                    "type": "full_file"
+                    "path": relative_path,
+                    "type": "full_file",
+                    "chunk_type": "full_file",
+                    "parent_id": parent_id
                 }
             )
+
+            chunks = self._extract_kotlin_chunks(content)
+            logger.debug(f"   {file_path.name}: {len(chunks)} chunks extracted")
+
+            for i, chunk in enumerate(chunks):
+                chunk_id = f"{doc_prefix}__chunk_{i:03d}"
+                chunk_meta = {
+                    "file": file_path.name,
+                    "path": relative_path,
+                    "type": "chunk",
+                    "chunk_type": chunk["chunk_type"],
+                    "function_name": chunk.get("function_name"),
+                    "class_name": chunk.get("class_name"),
+                    "is_test": chunk.get("is_test", False),
+                    "parent_id": parent_id,
+                    "chunk_index": i,
+                }
+
+                self.chroma_client.add_test(
+                    test_id=chunk_id,
+                    test_code=chunk["text"],
+                    test_file=relative_path,
+                    metadata=chunk_meta
+                )
             
         except Exception as e:
             logger.error(f"❌ Error in _index_test_file: {e}")
+
+    def _extract_kotlin_chunks(self, content: str) -> List[Dict[str, Any]]:
+        """Découpe un fichier Kotlin test en chunks utiles pour la recherche."""
+        lines = content.splitlines()
+        if not lines:
+            return []
+
+        chunks: List[Dict[str, Any]] = []
+
+        class_match = re.search(r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)", content)
+        class_name: Optional[str] = class_match.group(1) if class_match else None
+
+        function_starts: List[int] = []
+        for idx, line in enumerate(lines):
+            if re.match(r"^\s*fun\s+[A-Za-z_][A-Za-z0-9_]*\s*\(", line):
+                function_starts.append(idx)
+
+        # Header chunk: package/imports/class signature for global context.
+        if function_starts and function_starts[0] > 0:
+            header_text = "\n".join(lines[:function_starts[0]]).strip()
+            if header_text:
+                chunks.append({
+                    "chunk_type": "header",
+                    "class_name": class_name,
+                    "is_test": False,
+                    "text": header_text[:2500],
+                })
+
+        for i, start in enumerate(function_starts):
+            end = function_starts[i + 1] if i + 1 < len(function_starts) else len(lines)
+            adjusted_start = self._move_start_to_annotations(lines, start)
+
+            function_lines = lines[adjusted_start:end]
+            function_text = "\n".join(function_lines).strip()
+            if not function_text:
+                continue
+
+            name_match = re.search(r"\bfun\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", function_text)
+            function_name = name_match.group(1) if name_match else None
+            is_test = "@Test" in function_text or bool(function_name and function_name.lower().startswith("test"))
+
+            chunks.append({
+                "chunk_type": "test_method" if is_test else "method",
+                "function_name": function_name,
+                "class_name": class_name,
+                "is_test": is_test,
+                "text": function_text[:3000],
+            })
+
+        # Fallback: aucun fun détecté, indexer une version réduite du fichier.
+        if not chunks:
+            chunks.append({
+                "chunk_type": "raw",
+                "class_name": class_name,
+                "is_test": "@Test" in content,
+                "text": content[:3000],
+            })
+
+        return chunks
+
+    def _move_start_to_annotations(self, lines: List[str], function_start: int) -> int:
+        """Inclut les annotations Kotlin au-dessus de `fun` dans le chunk."""
+        i = function_start
+        while i > 0 and lines[i - 1].strip().startswith("@"):
+            i -= 1
+        return i
+
+    def _safe_id(self, value: str) -> str:
+        """Convertit un path en id stable compatible ChromaDB."""
+        return re.sub(r"[^a-zA-Z0-9_-]", "_", value)
     
     def index_conventions(self):
         """Indexe les conventions du projet SmartTalk"""

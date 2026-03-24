@@ -185,6 +185,84 @@ class GroqClient:
                 "success": False,
                 "error": str(e)
             }
+
+    def generate_unit_tests(
+        self,
+        source_code: str,
+        class_name: Optional[str] = None,
+        existing_tests: Optional[str] = None,
+        framework: str = "junit5_mockk",
+        include_edge_cases: bool = True,
+        max_tests: int = 6,
+        rag_context: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Generate Kotlin unit tests from source code."""
+        prompt = self._build_test_generation_prompt(
+            source_code=source_code,
+            class_name=class_name,
+            existing_tests=existing_tests,
+            framework=framework,
+            include_edge_cases=include_edge_cases,
+            max_tests=max_tests,
+            rag_context=rag_context,
+        )
+
+        cache_key = self._get_cache_key(
+            prompt,
+            system_prompt=self._get_test_generation_system_prompt(),
+        )
+        if settings.CACHE_ENABLED and cache_key in self.cache:
+            logger.info("✅ Cache hit for test generation")
+            return self.cache[cache_key]
+
+        estimated_tokens = self._estimate_tokens(prompt) + settings.GROQ_MAX_TOKENS
+        if not self._check_rate_limits(estimated_tokens):
+            return {
+                "success": False,
+                "error": "Rate limit exceeded. Please try again later.",
+                "rate_limit_exceeded": True,
+            }
+
+        try:
+            logger.info(f"🔄 Calling Groq API for unit test generation (estimated: {estimated_tokens} tokens)...")
+
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": self._get_test_generation_system_prompt(),
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    },
+                ],
+                temperature=0.05,
+                max_tokens=settings.GROQ_MAX_TOKENS,
+            )
+
+            content = response.choices[0].message.content or ""
+            tokens_used = response.usage.total_tokens
+            self.tokens_used_minute += tokens_used
+            self.tokens_used_day += tokens_used
+
+            result = self._parse_test_generation_response(content)
+            result["tokens_used"] = tokens_used
+            result["success"] = True
+
+            if settings.CACHE_ENABLED:
+                self.cache[cache_key] = result
+
+            logger.info(f"✅ Unit tests generated ({tokens_used} tokens used)")
+            return result
+
+        except Exception as e:
+            logger.error(f"❌ Groq API error during test generation: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+            }
     
     def _get_system_prompt(self) -> str:
         """
@@ -274,6 +352,74 @@ Be concise and accurate."""
         ])
         
         return "\n".join(prompt_parts)
+
+    def _get_test_generation_system_prompt(self) -> str:
+        """System prompt used for unit test generation requests."""
+        return """You are an expert Kotlin Android test engineer.
+
+Your task is to generate HIGH-QUALITY unit tests for provided source code.
+
+Rules:
+1. Return ONLY Kotlin test code in a single ```kotlin``` block.
+2. Use JUnit 5 (org.junit.jupiter.*) and MockK patterns when dependencies are involved.
+3. Cover happy path, error path, and edge cases when possible.
+4. Keep generated tests deterministic and readable.
+5. Include setup/teardown only if needed.
+6. Do not include explanations outside the code block.
+7. Do NOT use JUnit4 annotations/classes (RunWith, JUnit4, Rule, org.junit.Test, org.junit.Before).
+8. Avoid coroutine test wrappers (runTest/TestCoroutineRule) unless the source API is suspend/Flow/coroutine-based.
+9. Prefer assertTrue/assertFalse/assertEquals/assertNotNull from JUnit 5 assertions, not Kotlin assert(...).
+"""
+
+    def _build_test_generation_prompt(
+        self,
+        source_code: str,
+        class_name: Optional[str],
+        existing_tests: Optional[str],
+        framework: str,
+        include_edge_cases: bool,
+        max_tests: int,
+        rag_context: Optional[str],
+    ) -> str:
+        """Build prompt for Kotlin unit test generation."""
+        prompt_parts = [
+            "# TASK",
+            "Generate Kotlin unit tests for the provided source code.",
+            f"Framework: {framework}",
+            f"Target class: {class_name or 'auto-detect'}",
+            f"Max number of tests: {max_tests}",
+            f"Include edge cases: {'yes' if include_edge_cases else 'no'}",
+            "",
+            "# SOURCE CODE",
+            "```kotlin",
+            source_code.strip()[:5000],
+            "```",
+        ]
+
+        if existing_tests:
+            prompt_parts.extend([
+                "",
+                "# EXISTING TESTS (avoid duplicates, follow style)",
+                "```kotlin",
+                existing_tests.strip()[:3000],
+                "```",
+            ])
+
+        if rag_context:
+            prompt_parts.extend([
+                "",
+                "# PROJECT CONTEXT FROM RAG",
+                rag_context[:2500],
+            ])
+
+        prompt_parts.extend([
+            "",
+            "# OUTPUT FORMAT",
+            "Return ONLY one Kotlin code block with the generated tests.",
+            "Constraints: use JUnit5 imports, avoid JUnit4/RunWith/Rule, avoid runTest unless source clearly requires coroutines.",
+        ])
+
+        return "\n".join(prompt_parts)
     
     def _parse_correction_response(self, response: str) -> Dict[str, Any]:
         """
@@ -305,6 +451,27 @@ Be concise and accurate."""
             "corrected_code": corrected_code,
             "explanation": self._extract_explanation(response),
             "confidence": self._estimate_confidence(response)
+        }
+
+    def _parse_test_generation_response(self, response: str) -> Dict[str, Any]:
+        """Parse AI response to extract generated unit test code."""
+        code_start = response.find("```kotlin")
+        code_end = response.find("```", code_start + 9)
+
+        if code_start != -1 and code_end != -1:
+            generated_tests = response[code_start + 9:code_end].strip()
+        else:
+            code_start = response.find("```")
+            code_end = response.find("```", code_start + 3)
+            if code_start != -1 and code_end != -1:
+                generated_tests = response[code_start + 3:code_end].strip()
+            else:
+                generated_tests = response.strip()
+
+        return {
+            "generated_tests": generated_tests,
+            "explanation": self._extract_explanation(response),
+            "confidence": self._estimate_confidence(response),
         }
     
     def _extract_explanation(self, response: str) -> str:

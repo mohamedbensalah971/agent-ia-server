@@ -9,7 +9,9 @@ from datetime import datetime
 from typing import List, Dict, Any
 
 # Configuration
-API_BASE_URL = "http://localhost:8000"
+API_BASE_URL = "http://127.0.0.1:8000"
+LANGGRAPH_TIMEOUT_SECONDS = 90
+BASELINE_TIMEOUT_SECONDS = 30
 
 # Scénarios de test (vrais cas SmartTalk)
 TEST_SCENARIOS = [
@@ -96,7 +98,8 @@ def test_scenario(scenario: Dict[str, Any], use_langgraph: bool = True) -> Dict[
     start_time = time.time()
     
     try:
-        response = requests.post(url, json=payload, timeout=30)
+        timeout_seconds = LANGGRAPH_TIMEOUT_SECONDS if use_langgraph else BASELINE_TIMEOUT_SECONDS
+        response = requests.post(url, json=payload, timeout=timeout_seconds)
         end_time = time.time()
         
         processing_time = end_time - start_time
