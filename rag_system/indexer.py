@@ -185,7 +185,7 @@ class ProjectIndexer:
             {
                 "id": "conv_mockk",
                 "description": "Use MockK for mocking dependencies",
-                "example": "@MockK\nprivate lateinit var apiService: ApiService\n\n@Before\nfun setup() {\n    MockKAnnotations.init(this)\n}",
+                "example": "@MockK\nprivate lateinit var apiService: ApiService\n\n@BeforeEach\nfun setup() {\n    MockKAnnotations.init(this)\n}",
                 "category": "mocking"
             },
             {
@@ -196,8 +196,8 @@ class ProjectIndexer:
             },
             {
                 "id": "conv_coroutines",
-                "description": "Use TestCoroutineDispatcher for testing coroutines",
-                "example": "@get:Rule\nval coroutineRule = TestCoroutineRule()",
+                "description": "Use JUnit 5 annotations with StandardTestDispatcher for coroutines (no runTest wrapper)",
+                "example": "@Test\nfun testAsync() {\n    val testDispatcher = StandardTestDispatcher()\n    Dispatchers.setMain(testDispatcher)\n    // test code\n}",
                 "category": "coroutines"
             },
             {
@@ -211,6 +211,48 @@ class ProjectIndexer:
                 "description": "Structure tests with Given-When-Then pattern",
                 "example": "// Given\nval input = ...\n// When\nval result = ...\n// Then\nassertThat(result)...",
                 "category": "structure"
+            },
+            {
+                "id": "conv_adapter_tests",
+                "description": "RecyclerView adapter tests: test getItemViewType() return values, not private constants",
+                "example": "@Test\nfun testGetItemViewType_returnsSentTypeForSentMessage() {\n    // Given\n    val sentMessage = Message(..., isFromMe = true)\n    adapter.submitList(listOf(sentMessage))\n    // When\n    val itemViewType = adapter.getItemViewType(0)\n    // Then\n    assertThat(itemViewType).isEqualTo(MessagesAdapter.VIEW_TYPE_SENT)\n}",
+                "category": "android_patterns"
+            },
+            {
+                "id": "conv_no_private_access",
+                "description": "NEVER access private companion object constants or private nested classes in tests",
+                "example": "❌ DO NOT: adapter.getItemViewType(MessagesAdapter.VIEW_TYPE_SENT)\n✅ DO: val viewType = adapter.getItemViewType(0) // test return values only",
+                "category": "android_patterns"
+            },
+            {
+                "id": "conv_immutable_models",
+                "description": "Do NOT mutate model fields in tests - assume all fields are val (immutable)",
+                "example": "❌ DO NOT: message.isFromMe = false\n✅ DO: val message = Message(..., isFromMe = false) // create new instance",
+                "category": "android_patterns"
+            },
+            {
+                "id": "conv_no_view_mocking",
+                "description": "Do NOT mock ViewGroup/Context/LayoutInflater - use public adapter/view methods only",
+                "example": "❌ DO NOT: mockk<ViewGroup>() for onCreateViewHolder\n✅ DO: test public methods like getItemViewType(position)",
+                "category": "android_patterns"
+            },
+            {
+                "id": "conv_annotation_spelling",
+                "description": "Ensure all JUnit5 annotations are spelled correctly: @Test, @BeforeEach, @AfterEach (not @BeforeEachEach, @Testt, etc.)",
+                "example": "✅ @Test\n✅ @BeforeEach\n❌ @BeforeEachEach\n❌ @Testt",
+                "category": "syntax"
+            },
+            {
+                "id": "conv_pure_unit_tests",
+                "description": "Pure unit tests should NOT mock Android framework classes - test pure Kotlin logic only",
+                "example": "@Test\nfun testCalculation() {\n    // Pure Kotlin logic - NO Context, NO ViewGroup, NO Android framework\n    val result = calculator.add(2, 3)\n    assertThat(result).isEqualTo(5)\n}",
+                "category": "test_type"
+            },
+            {
+                "id": "conv_robolectric_ui_tests",
+                "description": "For UI/adapter tests requiring real Android framework, use Robolectric or test only public methods",
+                "example": "@RunWith(RobolectricTestRunner::class)\nclass AdapterUITest {\n    @Test\n    fun testAdapterBinding() { /* ... */ }\n}",
+                "category": "test_type"
             }
         ]
         

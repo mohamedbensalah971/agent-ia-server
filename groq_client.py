@@ -195,6 +195,7 @@ class GroqClient:
         include_edge_cases: bool = True,
         max_tests: int = 6,
         rag_context: Optional[str] = None,
+        test_target: str = "pure_unit",
     ) -> Dict[str, Any]:
         """Generate Kotlin unit tests from source code."""
         prompt = self._build_test_generation_prompt(
@@ -205,6 +206,7 @@ class GroqClient:
             include_edge_cases=include_edge_cases,
             max_tests=max_tests,
             rag_context=rag_context,
+            test_target=test_target,
         )
 
         cache_key = self._get_cache_key(
@@ -231,7 +233,7 @@ class GroqClient:
                 messages=[
                     {
                         "role": "system",
-                        "content": self._get_test_generation_system_prompt(),
+                        "content": self._get_test_generation_system_prompt(test_target=test_target),
                     },
                     {
                         "role": "user",
@@ -353,15 +355,15 @@ Be concise and accurate."""
         
         return "\n".join(prompt_parts)
 
-    def _get_test_generation_system_prompt(self) -> str:
+    def _get_test_generation_system_prompt(self, test_target: str = "pure_unit") -> str:
         """System prompt used for unit test generation requests."""
-        return """You are an expert Kotlin Android test engineer.
+        base_rules = """You are an expert Kotlin Android test engineer.
 
 Your task is to generate HIGH-QUALITY unit tests for provided source code.
 
-Rules:
+CORE RULES:
 1. Return ONLY Kotlin test code in a single ```kotlin``` block.
-2. Use JUnit 5 (org.junit.jupiter.*) and MockK patterns when dependencies are involved.
+2. Use JUnit 5 (org.junit.jupiter.*) and MockK patterns when applicable.
 3. Cover happy path, error path, and edge cases when possible.
 4. Keep generated tests deterministic and readable.
 5. Include setup/teardown only if needed.
@@ -369,7 +371,30 @@ Rules:
 7. Do NOT use JUnit4 annotations/classes (RunWith, JUnit4, Rule, org.junit.Test, org.junit.Before).
 8. Avoid coroutine test wrappers (runTest/TestCoroutineRule) unless the source API is suspend/Flow/coroutine-based.
 9. Prefer assertTrue/assertFalse/assertEquals/assertNotNull from JUnit 5 assertions, not Kotlin assert(...).
-"""
+
+CRITICAL ANDROID TEST RULES:
+10. NEVER access private member constants or private nested classes (e.g., never use ClassName.PRIVATE_CONSTANT or PrivateNestedClass).
+11. NEVER mutate model fields in tests—assume all model fields are val (immutable). Test public behavior only.
+12. NEVER mock Context/ViewGroup for view inflation tests. Use only public adapter methods (like getItemViewType).
+13. For RecyclerView adapters: test getItemViewType(position), assertions on returned values, not internal constants.
+14. Ensure all annotation names are spelled correctly (@BeforeEach, not @BeforeEachEach; @Test, not @Testt).
+15. Never reference private companion object constants. Test public method outputs instead.
+16. If you cannot generate a valid test respecting these rules, return empty code block."""
+        
+        if test_target == "android_ui":
+            return base_rules + """
+
+FOR ANDROID_UI TESTS:
+- Use Robolectric for real view inflation if needed.
+- Prefer LayoutInflater.from(context) over mocking ViewGroup.
+- Test view visibility and behavior, not private internal state."""
+        else:
+            return base_rules + """
+
+FOR PURE_UNIT TESTS (default):
+- Do NOT mock Android framework classes (Context, ViewGroup, View, LayoutInflater, etc.).
+- Test pure Kotlin logic without framework dependencies.
+- Use simple mocks for business logic only."""
 
     def _build_test_generation_prompt(
         self,
@@ -380,6 +405,7 @@ Rules:
         include_edge_cases: bool,
         max_tests: int,
         rag_context: Optional[str],
+        test_target: str = "pure_unit",
     ) -> str:
         """Build prompt for Kotlin unit test generation."""
         prompt_parts = [
@@ -387,6 +413,7 @@ Rules:
             "Generate Kotlin unit tests for the provided source code.",
             f"Framework: {framework}",
             f"Target class: {class_name or 'auto-detect'}",
+            f"Test type: {test_target}",
             f"Max number of tests: {max_tests}",
             f"Include edge cases: {'yes' if include_edge_cases else 'no'}",
             "",
@@ -473,6 +500,110 @@ Rules:
             "explanation": self._extract_explanation(response),
             "confidence": self._estimate_confidence(response),
         }
+    
+    def repair_generated_tests(
+        self,
+        generated_tests: str,
+        validation_errors: List[str],
+        source_code: Optional[str] = None,
+        test_target: str = "pure_unit",
+    ) -> Dict[str, Any]:
+        """
+        Auto-fix generated tests that fail validation.
+        
+        Args:
+            generated_tests: Previously generated test code with errors
+            validation_errors: List of validation errors found
+            source_code: Optional source code being tested
+            test_target: Target test type (pure_unit or android_ui)
+            
+        Returns:
+            Dict with repaired_tests, explanation, success status
+        """
+        if not validation_errors:
+            return {"success": True, "repaired_tests": generated_tests, "changes": []}
+        
+        errors_summary = "\n".join([f"- {err}" for err in validation_errors[:10]])  # Limit to 10 errors
+        
+        repair_prompt = f"""You are an expert Kotlin Android test engineer.
+
+TASK: Fix the following test code to resolve validation errors. Return ONLY the corrected Kotlin code.
+
+ORIGINAL TEST CODE:
+```kotlin
+{generated_tests.strip()[:3000]}
+```
+
+VALIDATION ERRORS TO FIX:
+{errors_summary}
+
+REQUIREMENTS:
+1. Fix ONLY the listed errors without changing test intent
+2. Do NOT mock Android framework classes (Context, ViewGroup, View, ViewGroup, etc.)
+3. Do NOT access private constants (ClassName.CONSTANT_NAME)
+4. Do NOT mutate model fields (assume all fields are val)
+5. Ensure all annotations are correctly spelled (@BeforeEach, @Test, not typos)
+6. Return ONLY the corrected Kotlin code in a ```kotlin``` block
+7. Preserve test method names and structure"""
+        
+        if source_code:
+            repair_prompt += f"""
+
+SOURCE CODE BEING TESTED (for reference):
+```kotlin
+{source_code.strip()[:2000]}
+```"""
+
+        estimated_tokens = self._estimate_tokens(repair_prompt) + settings.GROQ_MAX_TOKENS
+        if not self._check_rate_limits(estimated_tokens):
+            return {
+                "success": False,
+                "error": "Rate limit exceeded during repair",
+                "rate_limit_exceeded": True,
+            }
+
+        try:
+            logger.info(f"🔧 Attempting to repair generated tests with {len(validation_errors)} validation errors...")
+            
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": self._get_test_generation_system_prompt(test_target=test_target),
+                    },
+                    {
+                        "role": "user",
+                        "content": repair_prompt,
+                    },
+                ],
+                temperature=0.1,  # Slightly higher than generation to allow fixes but stay deterministic
+                max_tokens=settings.GROQ_MAX_TOKENS,
+            )
+
+            content = response.choices[0].message.content or ""
+            tokens_used = response.usage.total_tokens
+            self.tokens_used_minute += tokens_used
+            self.tokens_used_day += tokens_used
+
+            repaired_tests = self._parse_test_generation_response(content)["generated_tests"]
+            
+            logger.info(f"✅ Test repair complete ({tokens_used} tokens used)")
+            return {
+                "success": True,
+                "repaired_tests": repaired_tests,
+                "tokens_used": tokens_used,
+                "errors_fixed": len(validation_errors),
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Error during test repair: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "repaired_tests": generated_tests,  # Return original if repair fails
+            }
+    
     
     def _extract_explanation(self, response: str) -> str:
         """Extract explanation from response (if any)"""

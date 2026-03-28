@@ -233,7 +233,38 @@ def _post_process_generated_tests(code: str) -> Tuple[str, List[str], List[str]]
         cleaned_code = "import org.junit.jupiter.api.Assertions.*\n" + cleaned_code
         notes.append("Added JUnit5 Assertions import")
 
-    # Detect unresolved risky patterns.
+    # ENHANCED VALIDATION: Check for Android anti-patterns
+    # 1. Annotation typos (@BeforeEachEach, @Testt, etc.)
+    typo_annotations = re.findall(r"@Before\w{2,}Each|@Test\w+(?!\w)", cleaned_code)
+    if typo_annotations:
+        for typo in set(typo_annotations):
+            unresolved_issues.append(f"Typo in annotation: {typo} (did you mean @BeforeEach or @Test?)")
+
+    # 2. Private member/constant access (ClassName.CONSTANT or CompanionObject patterns)
+    # Pattern: IdentifierWithNumbers.UPPERCASE_NAME (typical private constant pattern)
+    private_constant_access = re.findall(r"\b([A-Z][a-zA-Z0-9]*)\.[A-Z_]+\s*(?:=|,|\)|:|@|\s*\n)", cleaned_code)
+    if private_constant_access:
+        for match in set(private_constant_access):
+            unresolved_issues.append(f"Possible private constant access: {match}.CONSTANT_NAME (should test public behavior instead)")
+
+    # 3. Immutable field mutations (pattern: variable.field = value where variable looks like a model)
+    field_mutations = re.findall(r"([a-z_][a-zA-Z0-9]*)\.[a-z_][a-zA-Z0-9]*\s*=\s*(?!\.)", cleaned_code)
+    if field_mutations:
+        for match in set(field_mutations):
+            unresolved_issues.append(f"Possible immutable field mutation: {match}.field = value (models are typically val)")
+
+    # 4. Android view mocking anti-patterns
+    view_mock_patterns = [
+        (r"mockk<ViewGroup>", "ViewGroup mocking"),
+        (r"mockk<Context>", "Context mocking"),
+        (r"mockk<LayoutInflater>", "LayoutInflater mocking"),
+        (r"mockk<View>\(\)", "View mocking"),
+    ]
+    for pattern, desc in view_mock_patterns:
+        if re.search(pattern, cleaned_code):
+            unresolved_issues.append(f"Android framework mocking detected: {desc} (use public adapter methods only)")
+
+    # Detect unresolved risky patterns (original checks).
     risk_patterns = {
         "@RunWith": "JUnit4 RunWith annotation still present",
         "JUnit4": "JUnit4 class reference still present",
@@ -454,6 +485,7 @@ async def generate_tests(request: TestGenerationRequest):
             include_edge_cases=request.include_edge_cases,
             max_tests=request.max_tests,
             rag_context=rag_context_text,
+            test_target=request.test_target,
         )
 
         if not result.get("success"):
@@ -469,26 +501,56 @@ async def generate_tests(request: TestGenerationRequest):
         generated_tests = result.get("generated_tests") or ""
         cleaned_tests, quality_notes, unresolved_issues = _post_process_generated_tests(generated_tests)
 
-        if request.strict_mode and unresolved_issues:
-            logger.warning(f"⚠️ Strict mode rejected generated tests: {unresolved_issues}")
-            return TestGenerationResponse(
-                success=False,
-                generation_id=generation_id,
-                generated_tests=cleaned_tests,
-                explanation=result.get("explanation"),
-                confidence=result.get("confidence"),
-                tokens_used=result.get("tokens_used"),
-                rag_context_used=rag_context_used,
-                quality_notes=quality_notes + unresolved_issues,
-                error="Generated tests contain risky patterns in strict mode. Review quality_notes.",
-            )
+        final_tests = cleaned_tests
+        repair_attempted = False
+        repair_notes = []
+
+        if unresolved_issues:
+            if request.strict_mode:
+                logger.warning(f"⚠️ Strict mode rejected generated tests: {unresolved_issues}")
+                return TestGenerationResponse(
+                    success=False,
+                    generation_id=generation_id,
+                    generated_tests=cleaned_tests,
+                    explanation=result.get("explanation"),
+                    confidence=result.get("confidence"),
+                    tokens_used=result.get("tokens_used"),
+                    rag_context_used=rag_context_used,
+                    quality_notes=quality_notes + unresolved_issues,
+                    error="Generated tests contain risky patterns in strict mode. Review quality_notes.",
+                )
+            else:
+                # Attempt repair pass when strict_mode=False
+                logger.info(f"🔧 Attempting repair pass for {len(unresolved_issues)} validation errors...")
+                repair_result = groq_client.repair_generated_tests(
+                    generated_tests=cleaned_tests,
+                    validation_errors=unresolved_issues[:10],  # Limit to top 10 errors
+                    source_code=request.source_code,
+                    test_target=request.test_target,
+                )
+                
+                if repair_result.get("success"):
+                    repaired_tests = repair_result.get("repaired_tests", cleaned_tests)
+                    # Re-validate repaired tests
+                    final_tests, post_repair_notes, post_repair_issues = _post_process_generated_tests(repaired_tests)
+                    repair_attempted = True
+                    repair_notes = [f"✅ Repair pass applied: fixed {repair_result.get('errors_fixed', 0)} validation errors"]
+                    
+                    if post_repair_issues:
+                        repair_notes.append(f"⚠️ {len(post_repair_issues)} issues persisted after repair: {post_repair_issues[:3]}")
+                    
+                    quality_notes.extend(repair_notes)
+                else:
+                    logger.warning(f"⚠️ Repair pass failed, returning original cleaned tests: {repair_result.get('error')}")
+                    repair_notes.append(f"⚠️ Repair pass failed: {repair_result.get('error')}")
+                    quality_notes.extend(repair_notes)
 
         logger.info(f"✅ Unit tests generated: {generation_id}")
 
         return TestGenerationResponse(
             success=True,
             generation_id=generation_id,
-            generated_tests=cleaned_tests,
+            generated_tests=final_tests,
             explanation=result.get("explanation"),
             confidence=result.get("confidence"),
             tokens_used=result.get("tokens_used"),
