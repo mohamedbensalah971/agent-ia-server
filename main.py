@@ -145,6 +145,7 @@ class TestGenerationRequest(BaseModel):
     max_tests: int = Field(6, ge=1, le=20, description="Approximate max number of tests")
     use_rag: bool = Field(True, description="Use RAG context from project knowledge base")
     strict_mode: bool = Field(True, description="Apply post-generation cleanup and fail if risky patterns remain")
+    test_target: Optional[str] = Field(None, description="Specific method or class to focus tests on")
 
 
 class TestGenerationResponse(BaseModel):

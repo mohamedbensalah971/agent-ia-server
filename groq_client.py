@@ -196,8 +196,27 @@ class GroqClient:
         max_tests: int = 6,
         rag_context: Optional[str] = None,
         test_target: str = "pure_unit",
+        auto_repair: bool = True,
+        max_repair_attempts: int = 2,
     ) -> Dict[str, Any]:
-        """Generate Kotlin unit tests from source code."""
+        """
+        Generate Kotlin unit tests from source code with validation and auto-repair.
+        
+        Args:
+            source_code: The source code to generate tests for
+            class_name: Optional target class name
+            existing_tests: Optional existing tests to match style
+            framework: Test framework (default: junit5_mockk)
+            include_edge_cases: Include edge case tests
+            max_tests: Maximum number of tests to generate
+            rag_context: Optional RAG context
+            test_target: Test type (pure_unit or android_ui)
+            auto_repair: Automatically fix validation errors (default: True)
+            max_repair_attempts: Max attempts to repair (default: 2)
+            
+        Returns:
+            Dict with generated_tests, validation_errors, success status
+        """
         prompt = self._build_test_generation_prompt(
             source_code=source_code,
             class_name=class_name,
@@ -240,7 +259,7 @@ class GroqClient:
                         "content": prompt,
                     },
                 ],
-                temperature=0.05,
+                temperature=0.0,  # Zero temperature for maximum determinism
                 max_tokens=settings.GROQ_MAX_TOKENS,
             )
 
@@ -250,13 +269,57 @@ class GroqClient:
             self.tokens_used_day += tokens_used
 
             result = self._parse_test_generation_response(content)
-            result["tokens_used"] = tokens_used
+            generated_tests = result["generated_tests"]
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # VALIDATION AND AUTO-REPAIR LOOP
+            # ═══════════════════════════════════════════════════════════════════
+            
+            validation_errors = self._validate_generated_tests(generated_tests)
+            repair_attempts = 0
+            total_tokens = tokens_used
+            
+            while validation_errors and auto_repair and repair_attempts < max_repair_attempts:
+                repair_attempts += 1
+                logger.warning(f"⚠️ Found {len(validation_errors)} validation errors, attempting repair #{repair_attempts}...")
+                for err in validation_errors[:5]:  # Log first 5 errors
+                    logger.warning(f"   - {err}")
+                
+                repair_result = self.repair_generated_tests(
+                    generated_tests=generated_tests,
+                    validation_errors=validation_errors,
+                    source_code=source_code,
+                    test_target=test_target,
+                )
+                
+                if repair_result.get("success"):
+                    generated_tests = repair_result["repaired_tests"]
+                    total_tokens += repair_result.get("tokens_used", 0)
+                    # Re-validate after repair
+                    validation_errors = self._validate_generated_tests(generated_tests)
+                    if not validation_errors:
+                        logger.info(f"✅ Tests repaired successfully after {repair_attempts} attempt(s)")
+                else:
+                    logger.warning(f"⚠️ Repair attempt #{repair_attempts} failed: {repair_result.get('error', 'Unknown error')}")
+                    break
+            
+            # Final result
+            result["generated_tests"] = generated_tests
+            result["tokens_used"] = total_tokens
             result["success"] = True
+            result["validation_errors"] = validation_errors
+            result["repair_attempts"] = repair_attempts
+            result["is_valid"] = len(validation_errors) == 0
 
-            if settings.CACHE_ENABLED:
+            if validation_errors:
+                logger.warning(f"⚠️ Tests generated with {len(validation_errors)} remaining validation issues")
+            else:
+                logger.info(f"✅ Unit tests generated and validated ({total_tokens} total tokens used)")
+
+            if settings.CACHE_ENABLED and not validation_errors:
+                # Only cache fully valid results
                 self.cache[cache_key] = result
 
-            logger.info(f"✅ Unit tests generated ({tokens_used} tokens used)")
             return result
 
         except Exception as e:
@@ -357,44 +420,180 @@ Be concise and accurate."""
 
     def _get_test_generation_system_prompt(self, test_target: str = "pure_unit") -> str:
         """System prompt used for unit test generation requests."""
-        base_rules = """You are an expert Kotlin Android test engineer.
+        base_rules = """You are an expert Kotlin Android test engineer. You write PRECISE, ERROR-FREE code.
 
-Your task is to generate HIGH-QUALITY unit tests for provided source code.
+TASK: Generate HIGH-QUALITY unit tests for provided source code.
 
-CORE RULES:
+═══════════════════════════════════════════════════════════════════
+CRITICAL: SPELL ALL ANNOTATIONS AND KEYWORDS EXACTLY AS SHOWN BELOW
+═══════════════════════════════════════════════════════════════════
+
+CORRECT ANNOTATIONS (copy these exactly):
+- @Test                    (NOT @Testt, @test, @TEST)
+- @BeforeEach              (NOT @BeforeEachEach, @Beforeeach, @beforeEach)
+- @AfterEach               (NOT @AfterEachEach, @Aftereach)
+- @DisplayName             (NOT @Displayname, @DisplayNam)
+- @Nested                  (NOT @nested, @NESTED)
+
+CORRECT IMPORTS (copy these exactly):
+```kotlin
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.*
+import org.junit.jupiter.api.DisplayName
+import io.mockk.mockk
+import io.mockk.every
+import io.mockk.verify
+import io.mockk.slot
+import io.mockk.coEvery
+import io.mockk.coVerify
+```
+
+═══════════════════════════════════════════════════════════════════
+OUTPUT FORMAT RULES
+═══════════════════════════════════════════════════════════════════
+
 1. Return ONLY Kotlin test code in a single ```kotlin``` block.
-2. Use JUnit 5 (org.junit.jupiter.*) and MockK patterns when applicable.
-3. Cover happy path, error path, and edge cases when possible.
-4. Keep generated tests deterministic and readable.
-5. Include setup/teardown only if needed.
-6. Do not include explanations outside the code block.
-7. Do NOT use JUnit4 annotations/classes (RunWith, JUnit4, Rule, org.junit.Test, org.junit.Before).
-8. Avoid coroutine test wrappers (runTest/TestCoroutineRule) unless the source API is suspend/Flow/coroutine-based.
-9. Prefer assertTrue/assertFalse/assertEquals/assertNotNull from JUnit 5 assertions, not Kotlin assert(...).
+2. Start with package declaration, then imports, then test class.
+3. Do NOT include explanations, comments about what you're doing, or markdown outside the code block.
+4. Every test function must have @Test annotation on the line immediately before "fun".
 
-CRITICAL ANDROID TEST RULES:
-10. NEVER access private member constants or private nested classes (e.g., never use ClassName.PRIVATE_CONSTANT or PrivateNestedClass).
-11. NEVER mutate model fields in tests—assume all model fields are val (immutable). Test public behavior only.
-12. NEVER mock Context/ViewGroup for view inflation tests. Use only public adapter methods (like getItemViewType).
-13. For RecyclerView adapters: test getItemViewType(position), assertions on returned values, not internal constants.
-14. Ensure all annotation names are spelled correctly (@BeforeEach, not @BeforeEachEach; @Test, not @Testt).
-15. Never reference private companion object constants. Test public method outputs instead.
-16. If you cannot generate a valid test respecting these rules, return empty code block."""
+═══════════════════════════════════════════════════════════════════
+JUNIT 5 RULES (NEVER USE JUNIT 4)
+═══════════════════════════════════════════════════════════════════
+
+NEVER USE (JUnit 4):
+- org.junit.Test
+- org.junit.Before
+- org.junit.After
+- @RunWith
+- @Rule
+
+ALWAYS USE (JUnit 5):
+- org.junit.jupiter.api.Test
+- org.junit.jupiter.api.BeforeEach
+- org.junit.jupiter.api.AfterEach
+
+═══════════════════════════════════════════════════════════════════
+MOCKK SYNTAX RULES
+═══════════════════════════════════════════════════════════════════
+
+CORRECT MockK patterns:
+```kotlin
+// Creating mocks
+private lateinit var mockService: MyService
+mockService = mockk()                    // relaxed=false by default
+mockService = mockk(relaxed = true)      // for relaxed mocks
+
+// Stubbing
+every { mockService.getData() } returns listOf("a", "b")
+every { mockService.process(any()) } returns Result.success(Unit)
+coEvery { mockService.fetchAsync() } returns data  // for suspend functions
+
+// Verification
+verify { mockService.getData() }
+verify(exactly = 1) { mockService.process(any()) }
+coVerify { mockService.fetchAsync() }  // for suspend functions
+```
+
+═══════════════════════════════════════════════════════════════════
+KOTLIN SYNTAX RULES
+═══════════════════════════════════════════════════════════════════
+
+1. Use assertEquals(expected, actual) - NOT assertEquals(actual, expected)
+2. Use assertNotNull(value) - NOT assert(value != null)
+3. Use assertTrue(condition) - NOT assert(condition)
+4. Balance all braces: every { must have matching }
+5. Balance all parentheses: every ( must have matching )
+6. String literals must be closed: every " must have matching "
+
+═══════════════════════════════════════════════════════════════════
+ANDROID/KOTLIN FORBIDDEN PATTERNS
+═══════════════════════════════════════════════════════════════════
+
+NEVER DO:
+- Access private constants: ClassName.PRIVATE_CONSTANT
+- Access private nested classes
+- Mutate data class fields (assume all are val)
+- Mock Android framework: Context, ViewGroup, View, LayoutInflater
+- Use Kotlin assert() function - use JUnit assertions
+- Use runTest{} unless testing suspend functions
+
+═══════════════════════════════════════════════════════════════════
+EXAMPLE OF CORRECT TEST CLASS
+═══════════════════════════════════════════════════════════════════
+
+```kotlin
+package com.example.app
+
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Assertions.*
+import io.mockk.mockk
+import io.mockk.every
+import io.mockk.verify
+
+class UserServiceTest {
+
+    private lateinit var mockRepository: UserRepository
+    private lateinit var userService: UserService
+
+    @BeforeEach
+    fun setUp() {
+        mockRepository = mockk(relaxed = true)
+        userService = UserService(mockRepository)
+    }
+
+    @Test
+    fun `getUser returns user when found`() {
+        // Arrange
+        val expectedUser = User(id = 1, name = "John")
+        every { mockRepository.findById(1) } returns expectedUser
+
+        // Act
+        val result = userService.getUser(1)
+
+        // Assert
+        assertNotNull(result)
+        assertEquals("John", result?.name)
+        verify { mockRepository.findById(1) }
+    }
+
+    @Test
+    fun `getUser returns null when not found`() {
+        // Arrange
+        every { mockRepository.findById(any()) } returns null
+
+        // Act
+        val result = userService.getUser(999)
+
+        // Assert
+        assertNull(result)
+    }
+}
+```"""
         
         if test_target == "android_ui":
             return base_rules + """
 
-FOR ANDROID_UI TESTS:
+═══════════════════════════════════════════════════════════════════
+ANDROID_UI TEST SPECIFIC RULES
+═══════════════════════════════════════════════════════════════════
 - Use Robolectric for real view inflation if needed.
 - Prefer LayoutInflater.from(context) over mocking ViewGroup.
-- Test view visibility and behavior, not private internal state."""
+- Test view visibility and behavior, not private internal state.
+- NEVER mock ViewGroup or Context directly."""
         else:
             return base_rules + """
 
-FOR PURE_UNIT TESTS (default):
-- Do NOT mock Android framework classes (Context, ViewGroup, View, LayoutInflater, etc.).
+═══════════════════════════════════════════════════════════════════
+PURE_UNIT TEST SPECIFIC RULES (default)
+═══════════════════════════════════════════════════════════════════
+- Do NOT mock Android framework classes (Context, ViewGroup, View, LayoutInflater).
 - Test pure Kotlin logic without framework dependencies.
-- Use simple mocks for business logic only."""
+- Use simple mocks for business/data layer interfaces only.
+- Focus on testing public methods and their return values."""
 
     def _build_test_generation_prompt(
         self,
@@ -409,15 +608,19 @@ FOR PURE_UNIT TESTS (default):
     ) -> str:
         """Build prompt for Kotlin unit test generation."""
         prompt_parts = [
-            "# TASK",
-            "Generate Kotlin unit tests for the provided source code.",
-            f"Framework: {framework}",
-            f"Target class: {class_name or 'auto-detect'}",
-            f"Test type: {test_target}",
-            f"Max number of tests: {max_tests}",
-            f"Include edge cases: {'yes' if include_edge_cases else 'no'}",
+            "═══════════════════════════════════════════════════════════════════",
+            "TASK: Generate Kotlin Unit Tests",
+            "═══════════════════════════════════════════════════════════════════",
             "",
-            "# SOURCE CODE",
+            f"• Target class: {class_name or 'auto-detect from source'}",
+            f"• Framework: {framework}",
+            f"• Test type: {test_target}",
+            f"• Number of tests: Generate up to {max_tests} tests",
+            f"• Edge cases: {'Include edge cases and error scenarios' if include_edge_cases else 'Focus on happy path only'}",
+            "",
+            "═══════════════════════════════════════════════════════════════════",
+            "SOURCE CODE TO TEST",
+            "═══════════════════════════════════════════════════════════════════",
             "```kotlin",
             source_code.strip()[:5000],
             "```",
@@ -426,7 +629,9 @@ FOR PURE_UNIT TESTS (default):
         if existing_tests:
             prompt_parts.extend([
                 "",
-                "# EXISTING TESTS (avoid duplicates, follow style)",
+                "═══════════════════════════════════════════════════════════════════",
+                "EXISTING TESTS (match this style, avoid duplicates)",
+                "═══════════════════════════════════════════════════════════════════",
                 "```kotlin",
                 existing_tests.strip()[:3000],
                 "```",
@@ -435,15 +640,37 @@ FOR PURE_UNIT TESTS (default):
         if rag_context:
             prompt_parts.extend([
                 "",
-                "# PROJECT CONTEXT FROM RAG",
+                "═══════════════════════════════════════════════════════════════════",
+                "PROJECT CONTEXT FROM KNOWLEDGE BASE",
+                "═══════════════════════════════════════════════════════════════════",
                 rag_context[:2500],
             ])
 
         prompt_parts.extend([
             "",
-            "# OUTPUT FORMAT",
-            "Return ONLY one Kotlin code block with the generated tests.",
-            "Constraints: use JUnit5 imports, avoid JUnit4/RunWith/Rule, avoid runTest unless source clearly requires coroutines.",
+            "═══════════════════════════════════════════════════════════════════",
+            "MANDATORY CHECKLIST (verify before responding)",
+            "═══════════════════════════════════════════════════════════════════",
+            "Before you output code, mentally verify:",
+            "□ All @Test annotations are spelled exactly as @Test",
+            "□ All @BeforeEach annotations are spelled exactly as @BeforeEach", 
+            "□ All imports use org.junit.jupiter.api (NOT org.junit)",
+            "□ All braces {} are balanced",
+            "□ All parentheses () are balanced",
+            "□ All string quotes \"\" are balanced",
+            "□ No private constants or nested classes accessed",
+            "□ No Android framework mocks (Context, View, ViewGroup)",
+            "□ Using assertEquals(expected, actual) not assertEquals(actual, expected)",
+            "",
+            "═══════════════════════════════════════════════════════════════════",
+            "OUTPUT",
+            "═══════════════════════════════════════════════════════════════════",
+            "Return ONLY a single ```kotlin``` code block containing:",
+            "1. Package declaration",
+            "2. Import statements", 
+            "3. Test class with test methods",
+            "",
+            "DO NOT include any text before or after the code block.",
         ])
 
         return "\n".join(prompt_parts)
@@ -500,6 +727,186 @@ FOR PURE_UNIT TESTS (default):
             "explanation": self._extract_explanation(response),
             "confidence": self._estimate_confidence(response),
         }
+
+    def _validate_generated_tests(self, code: str) -> List[str]:
+        """
+        Comprehensive validation of generated test code.
+        Catches typos, syntax issues, and common mistakes.
+        
+        Args:
+            code: Generated Kotlin test code
+            
+        Returns:
+            List of validation error messages (empty if valid)
+        """
+        import re
+        errors = []
+        
+        if not code or not code.strip():
+            return ["Empty code generated"]
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # ANNOTATION TYPO DETECTION
+        # ═══════════════════════════════════════════════════════════════════
+        
+        # Common @Test typos
+        test_typos = re.findall(r'@[Tt][Ee][Ss][Tt]+(?![a-zA-Z])', code)
+        for typo in test_typos:
+            if typo != "@Test":
+                errors.append(f"Annotation typo: '{typo}' should be '@Test'")
+        
+        # Common @BeforeEach typos  
+        before_typos = re.findall(r'@[Bb]efore[Ee]ach[Ee]?a?c?h?', code)
+        for typo in before_typos:
+            if typo != "@BeforeEach":
+                errors.append(f"Annotation typo: '{typo}' should be '@BeforeEach'")
+        
+        # Common @AfterEach typos
+        after_typos = re.findall(r'@[Aa]fter[Ee]ach[Ee]?a?c?h?', code)
+        for typo in after_typos:
+            if typo != "@AfterEach":
+                errors.append(f"Annotation typo: '{typo}' should be '@AfterEach'")
+        
+        # Detect doubled annotations like @TestTest, @BeforeEachEach
+        doubled_annotations = re.findall(r'@(\w+)\1', code)
+        for match in doubled_annotations:
+            errors.append(f"Doubled annotation detected: '@{match}{match}' - remove duplicate")
+        
+        # Detect other common annotation misspellings
+        if re.search(r'@Displayname\b', code):  # lowercase 'n'
+            errors.append("Annotation typo: '@Displayname' should be '@DisplayName'")
+        if re.search(r'@displayName\b', code):  # lowercase 'd'
+            errors.append("Annotation typo: '@displayName' should be '@DisplayName'")
+        if re.search(r'@nested\b', code):  # lowercase
+            errors.append("Annotation typo: '@nested' should be '@Nested'")
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # IMPORT VALIDATION
+        # ═══════════════════════════════════════════════════════════════════
+        
+        # Check for JUnit 4 imports (forbidden)
+        if "org.junit.Test" in code and "org.junit.jupiter" not in code:
+            errors.append("JUnit 4 import detected: 'org.junit.Test' - use 'org.junit.jupiter.api.Test'")
+        if "org.junit.Before" in code and "jupiter" not in code:
+            errors.append("JUnit 4 import detected: 'org.junit.Before' - use 'org.junit.jupiter.api.BeforeEach'")
+        if "org.junit.After" in code and "jupiter" not in code:
+            errors.append("JUnit 4 import detected: 'org.junit.After' - use 'org.junit.jupiter.api.AfterEach'")
+        if "@RunWith" in code:
+            errors.append("JUnit 4 annotation '@RunWith' detected - not compatible with JUnit 5")
+        if "@Rule" in code and "@JvmField" not in code:
+            errors.append("JUnit 4 annotation '@Rule' detected - use JUnit 5 extensions instead")
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # SYNTAX BALANCE CHECKS
+        # ═══════════════════════════════════════════════════════════════════
+        
+        # Brace balance
+        open_braces = code.count("{")
+        close_braces = code.count("}")
+        if open_braces != close_braces:
+            errors.append(f"Unbalanced braces: {open_braces} '{{' vs {close_braces} '}}'")
+        
+        # Parenthesis balance
+        open_parens = code.count("(")
+        close_parens = code.count(")")
+        if open_parens != close_parens:
+            errors.append(f"Unbalanced parentheses: {open_parens} '(' vs {close_parens} ')'")
+        
+        # Bracket balance
+        open_brackets = code.count("[")
+        close_brackets = code.count("]")
+        if open_brackets != close_brackets:
+            errors.append(f"Unbalanced brackets: {open_brackets} '[' vs {close_brackets} ']'")
+        
+        # String quote balance (rough check - may have false positives with escaped quotes)
+        # Count quotes that aren't escaped and aren't in triple quotes
+        single_quotes = len(re.findall(r'(?<!\\)(?<!\')"(?!"")(?!"")', code))
+        if single_quotes % 2 != 0:
+            errors.append("Potentially unbalanced double quotes")
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # STRUCTURE VALIDATION
+        # ═══════════════════════════════════════════════════════════════════
+        
+        # Must have at least one @Test annotation
+        if "@Test" not in code:
+            errors.append("No @Test annotation found - tests must have @Test")
+        
+        # Must have at least one 'fun ' declaration
+        if "fun " not in code:
+            errors.append("No function declaration found - missing 'fun '")
+        
+        # Check for class declaration
+        if "class " not in code:
+            errors.append("No class declaration found - test must be in a class")
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # FORBIDDEN PATTERNS
+        # ═══════════════════════════════════════════════════════════════════
+        
+        # Using Kotlin assert() instead of JUnit assertions
+        if re.search(r'\bassert\s*\(', code) and 'assertEquals' not in code:
+            errors.append("Using Kotlin 'assert()' - use JUnit assertions (assertEquals, assertTrue, etc.)")
+        
+        # Accessing private constants (pattern: ClassName.CONSTANT_NAME where CONSTANT is all caps)
+        private_const_access = re.findall(r'\b[A-Z][a-zA-Z0-9]+\.([A-Z][A-Z_0-9]+)\b', code)
+        # Filter out known valid patterns
+        known_valid = {'MAX_VALUE', 'MIN_VALUE', 'POSITIVE_INFINITY', 'NEGATIVE_INFINITY', 'NaN'}
+        for const in private_const_access:
+            if const not in known_valid:
+                # Only warn if it looks like an internal constant
+                if const.startswith('VIEW_TYPE_') or const.startswith('TYPE_') or '_ID' in const:
+                    errors.append(f"Possible private constant access: '{const}' - test public API instead")
+        
+        # Mocking Android framework classes
+        android_mock_patterns = [
+            (r'mockk<Context>', "Mocking Context is forbidden in pure unit tests"),
+            (r'mockk<ViewGroup>', "Mocking ViewGroup is forbidden in pure unit tests"),
+            (r'mockk<View>', "Mocking View is forbidden in pure unit tests"),
+            (r'mockk<LayoutInflater>', "Mocking LayoutInflater is forbidden in pure unit tests"),
+            (r'mock\(Context::class', "Mocking Context is forbidden in pure unit tests"),
+            (r'mock\(ViewGroup::class', "Mocking ViewGroup is forbidden in pure unit tests"),
+        ]
+        for pattern, message in android_mock_patterns:
+            if re.search(pattern, code):
+                errors.append(message)
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # MOCKK SYNTAX VALIDATION
+        # ═══════════════════════════════════════════════════════════════════
+        
+        # Check for common MockK mistakes
+        if "every{" in code.replace(" ", ""):
+            # Check if there's a space issue: every{ vs every {
+            if re.search(r'every\{[^}]', code):
+                errors.append("MockK syntax: 'every{' should have space: 'every {'")
+        
+        if "verify{" in code.replace(" ", ""):
+            if re.search(r'verify\{[^}]', code):
+                errors.append("MockK syntax: 'verify{' should have space: 'verify {'")
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # COMMON TYPOS IN KOTLIN KEYWORDS
+        # ═══════════════════════════════════════════════════════════════════
+        
+        keyword_typos = [
+            (r'\bfunn\b', 'funn', 'fun'),
+            (r'\boverridee\b', 'overridee', 'override'),
+            (r'\bretuns\b', 'retuns', 'returns'),
+            (r'\bprivatte\b', 'privatte', 'private'),
+            (r'\blateinitt\b', 'lateinitt', 'lateinit'),
+            (r'\bassertEqualss\b', 'assertEqualss', 'assertEquals'),
+            (r'\bassertTruee\b', 'assertTruee', 'assertTrue'),
+            (r'\bassertFalsee\b', 'assertFalsee', 'assertFalse'),
+            (r'\bassertNotNulll\b', 'assertNotNulll', 'assertNotNull'),
+            (r'\bassertNulll\b', 'assertNulll', 'assertNull'),
+        ]
+        
+        for pattern, typo, correct in keyword_typos:
+            if re.search(pattern, code, re.IGNORECASE):
+                errors.append(f"Keyword typo: '{typo}' should be '{correct}'")
+        
+        return errors
     
     def repair_generated_tests(
         self,
@@ -523,35 +930,63 @@ FOR PURE_UNIT TESTS (default):
         if not validation_errors:
             return {"success": True, "repaired_tests": generated_tests, "changes": []}
         
-        errors_summary = "\n".join([f"- {err}" for err in validation_errors[:10]])  # Limit to 10 errors
+        errors_summary = "\n".join([f"• {err}" for err in validation_errors[:10]])
         
-        repair_prompt = f"""You are an expert Kotlin Android test engineer.
+        repair_prompt = f"""═══════════════════════════════════════════════════════════════════
+TASK: FIX VALIDATION ERRORS IN TEST CODE
+═══════════════════════════════════════════════════════════════════
 
-TASK: Fix the following test code to resolve validation errors. Return ONLY the corrected Kotlin code.
+You must fix the validation errors listed below. Return ONLY the corrected Kotlin code.
 
-ORIGINAL TEST CODE:
-```kotlin
-{generated_tests.strip()[:3000]}
-```
-
-VALIDATION ERRORS TO FIX:
+═══════════════════════════════════════════════════════════════════
+VALIDATION ERRORS TO FIX
+═══════════════════════════════════════════════════════════════════
 {errors_summary}
 
-REQUIREMENTS:
-1. Fix ONLY the listed errors without changing test intent
-2. Do NOT mock Android framework classes (Context, ViewGroup, View, ViewGroup, etc.)
-3. Do NOT access private constants (ClassName.CONSTANT_NAME)
-4. Do NOT mutate model fields (assume all fields are val)
-5. Ensure all annotations are correctly spelled (@BeforeEach, @Test, not typos)
-6. Return ONLY the corrected Kotlin code in a ```kotlin``` block
-7. Preserve test method names and structure"""
+═══════════════════════════════════════════════════════════════════
+ORIGINAL TEST CODE (with errors)
+═══════════════════════════════════════════════════════════════════
+```kotlin
+{generated_tests.strip()[:3500]}
+```
+
+═══════════════════════════════════════════════════════════════════
+CORRECTION RULES
+═══════════════════════════════════════════════════════════════════
+
+ANNOTATION SPELLING (copy exactly):
+• @Test (NOT @Testt, @test)
+• @BeforeEach (NOT @BeforeEachEach, @Beforeeach)
+• @AfterEach (NOT @AfterEachEach)
+• @DisplayName (NOT @Displayname)
+
+REQUIRED FIXES:
+1. Fix ALL typos in annotations and keywords
+2. Balance all braces {{}}, parentheses (), brackets []
+3. Use JUnit 5 imports: org.junit.jupiter.api.*
+4. Remove any Android framework mocks (Context, View, ViewGroup)
+5. Remove any private constant access (ClassName.PRIVATE_CONST)
+
+FORBIDDEN:
+• JUnit 4 imports (org.junit.Test, org.junit.Before)
+• @RunWith, @Rule annotations
+• Kotlin assert() function - use assertEquals, assertTrue, etc.
+• Mocking Context, View, ViewGroup, LayoutInflater
+
+═══════════════════════════════════════════════════════════════════
+OUTPUT
+═══════════════════════════════════════════════════════════════════
+Return ONLY the corrected code in a single ```kotlin``` block.
+Do NOT include explanations or comments outside the code block."""
         
         if source_code:
             repair_prompt += f"""
 
-SOURCE CODE BEING TESTED (for reference):
+═══════════════════════════════════════════════════════════════════
+SOURCE CODE (for reference only)
+═══════════════════════════════════════════════════════════════════
 ```kotlin
-{source_code.strip()[:2000]}
+{source_code.strip()[:1500]}
 ```"""
 
         estimated_tokens = self._estimate_tokens(repair_prompt) + settings.GROQ_MAX_TOKENS

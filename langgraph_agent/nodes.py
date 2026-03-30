@@ -121,23 +121,40 @@ class WorkflowNodes:
             "similar_fixes": state.get("similar_fixes", []),
         })
 
-        prompt = f"""Tu es un expert en tests Kotlin Android.
+        prompt = f"""═══════════════════════════════════════════════════════════════════
+TASK: Fix the failing Kotlin Android test
+═══════════════════════════════════════════════════════════════════
 
-TEST ÉCHOUÉ:
+FAILING TEST CODE:
+```kotlin
 {state['test_code']}
+```
 
-ERREUR:
+ERROR MESSAGE:
 {state['error_message']}
 
-TYPE D'ERREUR: {state['error_type']}
+ERROR TYPE: {state['error_type']}
 
-CONTEXTE DU PROJET (issu de la base de connaissances):
-{rag_context if rag_context else "Aucun contexte disponible"}
+═══════════════════════════════════════════════════════════════════
+PROJECT CONTEXT (from knowledge base)
+═══════════════════════════════════════════════════════════════════
+{rag_context if rag_context else "No additional context available"}
 
-TÂCHE:
-Génère UNIQUEMENT le code corrigé complet du test.
-Ne donne PAS d'explication, juste le code Kotlin.
-Respecte les conventions du projet.
+═══════════════════════════════════════════════════════════════════
+CRITICAL RULES
+═══════════════════════════════════════════════════════════════════
+1. Return ONLY the corrected Kotlin code in a ```kotlin``` block
+2. Spell all annotations exactly: @Test, @BeforeEach, @AfterEach
+3. Use JUnit 5 imports (org.junit.jupiter.api.*)
+4. Use MockK syntax correctly: every {{ }}, verify {{ }}
+5. Balance all braces and parentheses
+6. Do NOT include explanations outside the code block
+
+CORRECT ANNOTATION EXAMPLES:
+- @Test (NOT @Testt)
+- @BeforeEach (NOT @BeforeEachEach)
+- assertEquals(expected, actual)
+- every {{ mock.method() }} returns value
 """
         
         # Appel Groq
@@ -145,15 +162,15 @@ Respecte les conventions du projet.
         proposed_fix = response.content
         
         # Générer explication
-        explanation_prompt = f"""Explique en 2-3 phrases courtes pourquoi cette correction résout le problème:
+        explanation_prompt = f"""Explain in 2-3 short sentences why this fix resolves the issue:
 
-CODE ORIGINAL:
-{state['test_code']}
+ORIGINAL CODE:
+{state['test_code'][:500]}
 
-CODE CORRIGÉ:
-{proposed_fix}
+FIXED CODE:
+{proposed_fix[:500]}
 
-ERREUR:
+ERROR:
 {state['error_message']}
 """
         
@@ -171,14 +188,56 @@ ERREUR:
         }
     
     def validate_fix(self, state: AgentState) -> Dict[str, Any]:
-        """Nœud 5: Valider la syntaxe Kotlin"""
+        """Nœud 5: Valider la syntaxe Kotlin avec détection de typos"""
         print("✅ Validation de la syntaxe...")
         
         proposed_fix = state.get("proposed_fix", "")
         
-        # Validations basiques
         validation_errors = []
         is_valid = True
+        
+        if not proposed_fix or not proposed_fix.strip():
+            validation_errors.append("Code vide généré")
+            return {
+                "is_valid_kotlin": False,
+                "validation_errors": validation_errors,
+                "steps_completed": state["steps_completed"] + ["validate_fix"]
+            }
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # ANNOTATION TYPO DETECTION
+        # ═══════════════════════════════════════════════════════════════════
+        
+        # Common @Test typos
+        test_typos = re.findall(r'@[Tt][Ee][Ss][Tt]+(?![a-zA-Z])', proposed_fix)
+        for typo in test_typos:
+            if typo != "@Test":
+                validation_errors.append(f"Typo annotation: '{typo}' → '@Test'")
+                is_valid = False
+        
+        # Common @BeforeEach typos
+        before_typos = re.findall(r'@[Bb]efore[Ee]ach[Ee]?a?c?h?', proposed_fix)
+        for typo in before_typos:
+            if typo != "@BeforeEach":
+                validation_errors.append(f"Typo annotation: '{typo}' → '@BeforeEach'")
+                is_valid = False
+        
+        # Common @AfterEach typos
+        after_typos = re.findall(r'@[Aa]fter[Ee]ach[Ee]?a?c?h?', proposed_fix)
+        for typo in after_typos:
+            if typo != "@AfterEach":
+                validation_errors.append(f"Typo annotation: '{typo}' → '@AfterEach'")
+                is_valid = False
+        
+        # Detect doubled annotations (@TestTest, @BeforeEachEach)
+        doubled = re.findall(r'@(\w+)\1', proposed_fix)
+        for match in doubled:
+            validation_errors.append(f"Annotation doublée: '@{match}{match}'")
+            is_valid = False
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # STRUCTURE VALIDATION
+        # ═══════════════════════════════════════════════════════════════════
         
         # Check 1: Le code contient @Test
         if "@Test" not in proposed_fix:
@@ -192,7 +251,24 @@ ERREUR:
         
         # Check 3: Accolades équilibrées
         if proposed_fix.count("{") != proposed_fix.count("}"):
-            validation_errors.append("Accolades non équilibrées")
+            validation_errors.append(f"Accolades non équilibrées: {proposed_fix.count('{')} '{{' vs {proposed_fix.count('}')} '}}'")
+            is_valid = False
+        
+        # Check 4: Parenthèses équilibrées
+        if proposed_fix.count("(") != proposed_fix.count(")"):
+            validation_errors.append(f"Parenthèses non équilibrées: {proposed_fix.count('(')} '(' vs {proposed_fix.count(')')} ')'")
+            is_valid = False
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # JUNIT IMPORT VALIDATION
+        # ═══════════════════════════════════════════════════════════════════
+        
+        if "org.junit.Test" in proposed_fix and "org.junit.jupiter" not in proposed_fix:
+            validation_errors.append("Import JUnit 4 détecté: utiliser org.junit.jupiter.api.Test")
+            is_valid = False
+        
+        if "@RunWith" in proposed_fix:
+            validation_errors.append("@RunWith (JUnit 4) détecté: non compatible avec JUnit 5")
             is_valid = False
         
         return {
