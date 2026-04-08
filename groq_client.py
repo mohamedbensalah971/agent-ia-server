@@ -13,6 +13,258 @@ from cachetools import TTLCache
 from loguru import logger
 
 from config import settings
+import re as regex_module
+
+
+def analyze_kotlin_code(source_code: str) -> Dict[str, Any]:
+    """
+    Analyze Kotlin source code to detect testability constraints.
+    
+    This helps the LLM understand what CAN and CANNOT be tested directly,
+    preventing logic errors in generated tests.
+    
+    Args:
+        source_code: The Kotlin source code to analyze
+        
+    Returns:
+        Dict with analysis results:
+        - class_type: 'regular', 'inner', 'data', 'sealed', 'object', etc.
+        - inner_classes: List of inner class names (can't instantiate directly)
+        - private_classes: List of private nested class names (can't access)
+        - android_dependencies: List of Android framework deps found
+        - testable_methods: List of public methods that can be tested
+        - constraints: List of testing constraints/warnings for the LLM
+        - requires_robolectric: Boolean if Android UI testing needed
+    """
+    analysis = {
+        "class_name": None,
+        "class_type": "regular",
+        "inner_classes": [],
+        "private_classes": [],
+        "companion_objects": [],
+        "android_dependencies": [],
+        "testable_methods": [],
+        "private_methods": [],
+        "constraints": [],
+        "requires_robolectric": False,
+        "extends": None,
+        "implements": [],
+    }
+    
+    # Detect main class name and type
+    class_match = regex_module.search(
+        r'(?:(?:public|private|internal|abstract|sealed|data|open)\s+)*'
+        r'(?:inner\s+)?'
+        r'class\s+(\w+)',
+        source_code
+    )
+    if class_match:
+        analysis["class_name"] = class_match.group(1)
+    
+    # Detect if it's a data class
+    if regex_module.search(r'\bdata\s+class\b', source_code):
+        analysis["class_type"] = "data"
+    
+    # Detect if it's a sealed class
+    if regex_module.search(r'\bsealed\s+class\b', source_code):
+        analysis["class_type"] = "sealed"
+    
+    # Detect if it's an object (singleton)
+    if regex_module.search(r'\bobject\s+\w+', source_code) and 'companion object' not in source_code:
+        analysis["class_type"] = "object"
+    
+    # Detect parent class (extends)
+    extends_match = regex_module.search(
+        r'class\s+\w+[^:]*:\s*(\w+)\s*[\(\{<]',
+        source_code
+    )
+    if extends_match:
+        analysis["extends"] = extends_match.group(1)
+    
+    # ═══════════════════════════════════════════════════════════════════
+    # DETECT INNER CLASSES (Cannot be instantiated outside outer class)
+    # ═══════════════════════════════════════════════════════════════════
+    inner_classes = regex_module.findall(r'\binner\s+class\s+(\w+)', source_code)
+    analysis["inner_classes"] = inner_classes
+    for ic in inner_classes:
+        analysis["constraints"].append(
+            f"INNER CLASS '{ic}': Cannot instantiate directly. "
+            f"Must create outer class instance first or test through outer class methods."
+        )
+    
+    # ═══════════════════════════════════════════════════════════════════
+    # DETECT PRIVATE NESTED CLASSES (Cannot access from tests)
+    # ═══════════════════════════════════════════════════════════════════
+    private_classes = regex_module.findall(r'\bprivate\s+(?:inner\s+)?class\s+(\w+)', source_code)
+    analysis["private_classes"] = private_classes
+    for pc in private_classes:
+        analysis["constraints"].append(
+            f"PRIVATE CLASS '{pc}': Cannot access from tests. "
+            f"Test its behavior indirectly through public API."
+        )
+    
+    # ═══════════════════════════════════════════════════════════════════
+    # DETECT COMPANION OBJECTS
+    # ═══════════════════════════════════════════════════════════════════
+    if 'companion object' in source_code:
+        analysis["companion_objects"].append("Companion")
+        # Check for private companion members
+        if regex_module.search(r'companion\s+object\s*\{[^}]*private', source_code, regex_module.DOTALL):
+            analysis["constraints"].append(
+                "COMPANION OBJECT has private members: Cannot access private companion members from tests."
+            )
+    
+    # ═══════════════════════════════════════════════════════════════════
+    # DETECT ANDROID DEPENDENCIES
+    # ═══════════════════════════════════════════════════════════════════
+    android_patterns = [
+        (r'\bView\b', 'View'),
+        (r'\bViewGroup\b', 'ViewGroup'),
+        (r'\bContext\b', 'Context'),
+        (r'\bLayoutInflater\b', 'LayoutInflater'),
+        (r'\bRecyclerView\b', 'RecyclerView'),
+        (r'\bTextView\b', 'TextView'),
+        (r'\bImageView\b', 'ImageView'),
+        (r'\bButton\b', 'Button'),
+        (r'\bFragment\b', 'Fragment'),
+        (r'\bActivity\b', 'Activity'),
+        (r'\bIntent\b', 'Intent'),
+        (r'\bBundle\b', 'Bundle'),
+        (r'\bSharedPreferences\b', 'SharedPreferences'),
+        (r'\bLifecycleOwner\b', 'LifecycleOwner'),
+        (r'\bLiveData\b', 'LiveData'),
+        (r'R\.layout\.', 'R.layout'),
+        (r'R\.id\.', 'R.id'),
+        (r'R\.string\.', 'R.string'),
+        (r'R\.drawable\.', 'R.drawable'),
+        (r'\.findViewById\(', 'findViewById'),
+    ]
+    
+    found_android = set()
+    for pattern, name in android_patterns:
+        if regex_module.search(pattern, source_code):
+            found_android.add(name)
+    
+    analysis["android_dependencies"] = list(found_android)
+    
+    if found_android:
+        # Determine if Robolectric is needed
+        ui_deps = {'View', 'ViewGroup', 'TextView', 'ImageView', 'Button', 
+                   'LayoutInflater', 'R.layout', 'R.id', 'findViewById'}
+        if found_android & ui_deps:
+            analysis["requires_robolectric"] = True
+            analysis["constraints"].append(
+                f"ANDROID UI DEPENDENCIES: {', '.join(found_android & ui_deps)}. "
+                f"These require Robolectric for unit testing, OR test only non-UI logic."
+            )
+        
+        lifecycle_deps = {'Fragment', 'Activity', 'LifecycleOwner'}
+        if found_android & lifecycle_deps:
+            analysis["constraints"].append(
+                f"LIFECYCLE DEPENDENCIES: {', '.join(found_android & lifecycle_deps)}. "
+                f"Mock these or use AndroidX Test libraries."
+            )
+    
+    # ═══════════════════════════════════════════════════════════════════
+    # DETECT ADAPTER PATTERN
+    # ═══════════════════════════════════════════════════════════════════
+    if 'ListAdapter' in source_code or 'RecyclerView.Adapter' in source_code:
+        analysis["class_type"] = "recycler_adapter"
+        analysis["constraints"].append(
+            "RECYCLERVIEW ADAPTER: ViewHolder is usually an inner class. "
+            "Test DiffCallback logic directly if it's accessible. "
+            "Test adapter behavior through submitList() and itemCount."
+        )
+    
+    # ═══════════════════════════════════════════════════════════════════
+    # DETECT DIFFUTIL CALLBACK
+    # ═══════════════════════════════════════════════════════════════════
+    diffutil_match = regex_module.search(r'class\s+(\w+)\s*:\s*DiffUtil\.ItemCallback', source_code)
+    if diffutil_match:
+        callback_name = diffutil_match.group(1)
+        # Check if it's private
+        if regex_module.search(rf'\bprivate\s+class\s+{callback_name}', source_code):
+            analysis["constraints"].append(
+                f"DIFFUTIL CALLBACK '{callback_name}' is private: "
+                f"Test indirectly by observing adapter behavior after submitList()."
+            )
+        else:
+            analysis["testable_methods"].append(f"{callback_name}.areItemsTheSame()")
+            analysis["testable_methods"].append(f"{callback_name}.areContentsTheSame()")
+    
+    # ═══════════════════════════════════════════════════════════════════
+    # DETECT PUBLIC METHODS
+    # ═══════════════════════════════════════════════════════════════════
+    # Public methods (no private/protected modifier before fun)
+    public_methods = regex_module.findall(
+        r'(?<!\bprivate\s)(?<!\bprotected\s)(?<!\binternal\s)\bfun\s+(\w+)\s*\(',
+        source_code
+    )
+    # Filter out override methods that are just implementation details
+    override_methods = regex_module.findall(r'\boverride\s+fun\s+(\w+)', source_code)
+    
+    for method in public_methods:
+        if method not in ['onCreateViewHolder', 'onBindViewHolder', 'getItemCount']:
+            analysis["testable_methods"].append(method)
+    
+    # ═══════════════════════════════════════════════════════════════════
+    # DETECT PRIVATE METHODS
+    # ═══════════════════════════════════════════════════════════════════
+    private_methods = regex_module.findall(r'\bprivate\s+fun\s+(\w+)', source_code)
+    analysis["private_methods"] = private_methods
+    if private_methods:
+        analysis["constraints"].append(
+            f"PRIVATE METHODS ({', '.join(private_methods[:3])}{'...' if len(private_methods) > 3 else ''}): "
+            f"Test through public API, not directly."
+        )
+    
+    return analysis
+
+
+def format_analysis_for_prompt(analysis: Dict[str, Any]) -> str:
+    """
+    Format code analysis results as clear instructions for the LLM.
+    
+    Args:
+        analysis: Results from analyze_kotlin_code()
+        
+    Returns:
+        Formatted string to inject into the prompt
+    """
+    if not analysis["constraints"]:
+        return ""
+    
+    lines = [
+        "═══════════════════════════════════════════════════════════════════",
+        "⚠️  CODE ANALYSIS - TESTING CONSTRAINTS (MUST FOLLOW)",
+        "═══════════════════════════════════════════════════════════════════",
+    ]
+    
+    # Class info
+    if analysis["class_name"]:
+        lines.append(f"Class: {analysis['class_name']} (type: {analysis['class_type']})")
+        if analysis["extends"]:
+            lines.append(f"Extends: {analysis['extends']}")
+    
+    lines.append("")
+    lines.append("CONSTRAINTS YOU MUST FOLLOW:")
+    
+    for i, constraint in enumerate(analysis["constraints"], 1):
+        lines.append(f"{i}. {constraint}")
+    
+    if analysis["testable_methods"]:
+        lines.append("")
+        lines.append(f"TESTABLE METHODS: {', '.join(analysis['testable_methods'][:5])}")
+    
+    if analysis["requires_robolectric"]:
+        lines.append("")
+        lines.append("⚠️  ROBOLECTRIC REQUIRED: This class has Android UI dependencies.")
+        lines.append("   Either use @RunWith(RobolectricTestRunner::class) OR")
+        lines.append("   Only test non-UI logic (DiffCallback, data transformations, etc.)")
+    
+    lines.append("")
+    
+    return "\n".join(lines)
 
 
 class GroqClient:
@@ -275,7 +527,7 @@ class GroqClient:
             # VALIDATION AND AUTO-REPAIR LOOP
             # ═══════════════════════════════════════════════════════════════════
             
-            validation_errors = self._validate_generated_tests(generated_tests)
+            validation_errors = self._validate_generated_tests(generated_tests, source_code=source_code)
             repair_attempts = 0
             total_tokens = tokens_used
             
@@ -295,8 +547,8 @@ class GroqClient:
                 if repair_result.get("success"):
                     generated_tests = repair_result["repaired_tests"]
                     total_tokens += repair_result.get("tokens_used", 0)
-                    # Re-validate after repair
-                    validation_errors = self._validate_generated_tests(generated_tests)
+                    # Re-validate after repair (with source code for context)
+                    validation_errors = self._validate_generated_tests(generated_tests, source_code=source_code)
                     if not validation_errors:
                         logger.info(f"✅ Tests repaired successfully after {repair_attempts} attempt(s)")
                 else:
@@ -606,7 +858,18 @@ PURE_UNIT TEST SPECIFIC RULES (default)
         rag_context: Optional[str],
         test_target: str = "pure_unit",
     ) -> str:
-        """Build prompt for Kotlin unit test generation."""
+        """Build prompt for Kotlin unit test generation with code analysis."""
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # ANALYZE SOURCE CODE FOR CONSTRAINTS
+        # ═══════════════════════════════════════════════════════════════════
+        code_analysis = analyze_kotlin_code(source_code)
+        analysis_text = format_analysis_for_prompt(code_analysis)
+        
+        # Auto-detect class name if not provided
+        if not class_name and code_analysis["class_name"]:
+            class_name = code_analysis["class_name"]
+        
         prompt_parts = [
             "═══════════════════════════════════════════════════════════════════",
             "TASK: Generate Kotlin Unit Tests",
@@ -618,13 +881,22 @@ PURE_UNIT TEST SPECIFIC RULES (default)
             f"• Number of tests: Generate up to {max_tests} tests",
             f"• Edge cases: {'Include edge cases and error scenarios' if include_edge_cases else 'Focus on happy path only'}",
             "",
+        ]
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # INSERT CODE ANALYSIS CONSTRAINTS (CRITICAL!)
+        # ═══════════════════════════════════════════════════════════════════
+        if analysis_text:
+            prompt_parts.append(analysis_text)
+        
+        prompt_parts.extend([
             "═══════════════════════════════════════════════════════════════════",
             "SOURCE CODE TO TEST",
             "═══════════════════════════════════════════════════════════════════",
             "```kotlin",
             source_code.strip()[:5000],
             "```",
-        ]
+        ])
 
         if existing_tests:
             prompt_parts.extend([
@@ -728,13 +1000,14 @@ PURE_UNIT TEST SPECIFIC RULES (default)
             "confidence": self._estimate_confidence(response),
         }
 
-    def _validate_generated_tests(self, code: str) -> List[str]:
+    def _validate_generated_tests(self, code: str, source_code: Optional[str] = None) -> List[str]:
         """
         Comprehensive validation of generated test code.
-        Catches typos, syntax issues, and common mistakes.
+        Catches typos, syntax issues, common mistakes, AND logic errors.
         
         Args:
             code: Generated Kotlin test code
+            source_code: Original source code (for contextual validation)
             
         Returns:
             List of validation error messages (empty if valid)
@@ -744,6 +1017,50 @@ PURE_UNIT TEST SPECIFIC RULES (default)
         
         if not code or not code.strip():
             return ["Empty code generated"]
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # CONTEXTUAL LOGIC VALIDATION (if source code provided)
+        # ═══════════════════════════════════════════════════════════════════
+        if source_code:
+            analysis = analyze_kotlin_code(source_code)
+            
+            # Check for direct inner class instantiation
+            for inner_class in analysis["inner_classes"]:
+                # Pattern: ClassName(args) where ClassName is an inner class
+                # But NOT: OuterClass().InnerClass() which is valid
+                pattern = rf'(?<!\.)(?<!\w){inner_class}\s*\('
+                if re.search(pattern, code):
+                    # Make sure it's not being accessed through an outer instance
+                    # Valid: adapter.ViewHolder(...) or ConversationsAdapter().ViewHolder(...)
+                    # Invalid: ViewHolder(...) directly
+                    outer_class = analysis["class_name"]
+                    valid_pattern = rf'(?:{outer_class}\(\)|{outer_class.lower()}|adapter)\s*\.\s*{inner_class}'
+                    if not re.search(valid_pattern, code, re.IGNORECASE):
+                        errors.append(
+                            f"LOGIC ERROR: '{inner_class}' is an inner class of '{outer_class}'. "
+                            f"Cannot instantiate directly. Use '{outer_class.lower()}.{inner_class}()' "
+                            f"or create through the outer class instance."
+                        )
+            
+            # Check for private class access
+            for private_class in analysis["private_classes"]:
+                if re.search(rf'\b{private_class}\s*\(', code):
+                    errors.append(
+                        f"LOGIC ERROR: '{private_class}' is a private class. "
+                        f"Cannot access or instantiate from test code. "
+                        f"Test its behavior indirectly through public API."
+                    )
+            
+            # Check for tests that don't set up adapter data before testing
+            if analysis["class_type"] == "recycler_adapter":
+                # If testing onBindViewHolder but not calling submitList
+                if "onBindViewHolder" in code and "submitList" not in code:
+                    # Check if there's any data setup
+                    if "getItem(" in code or "currentList" in code:
+                        errors.append(
+                            "LOGIC ERROR: Testing adapter binding without data setup. "
+                            "Call adapter.submitList(listOf(...)) before testing onBindViewHolder."
+                        )
         
         # ═══════════════════════════════════════════════════════════════════
         # ANNOTATION TYPO DETECTION
@@ -960,18 +1277,31 @@ ANNOTATION SPELLING (copy exactly):
 • @AfterEach (NOT @AfterEachEach)
 • @DisplayName (NOT @Displayname)
 
+LOGIC ERROR FIXES:
+• INNER CLASS: If error says "inner class", you CANNOT instantiate it directly.
+  - Remove tests that try to create inner class directly
+  - Test through the outer class public API instead
+  - Example: Instead of "ViewHolder(view)", test adapter behavior
+• PRIVATE CLASS: If error says "private class", you cannot access it.
+  - Remove tests for private classes
+  - Test indirectly through public methods
+• ADAPTER DATA: For RecyclerView adapters, call submitList() before testing bindings
+
 REQUIRED FIXES:
 1. Fix ALL typos in annotations and keywords
 2. Balance all braces {{}}, parentheses (), brackets []
 3. Use JUnit 5 imports: org.junit.jupiter.api.*
 4. Remove any Android framework mocks (Context, View, ViewGroup)
 5. Remove any private constant access (ClassName.PRIVATE_CONST)
+6. Remove tests for inaccessible classes (inner, private)
 
 FORBIDDEN:
 • JUnit 4 imports (org.junit.Test, org.junit.Before)
 • @RunWith, @Rule annotations
 • Kotlin assert() function - use assertEquals, assertTrue, etc.
 • Mocking Context, View, ViewGroup, LayoutInflater
+• Direct instantiation of inner classes without outer instance
+• Testing private nested classes
 
 ═══════════════════════════════════════════════════════════════════
 OUTPUT
@@ -980,7 +1310,16 @@ Return ONLY the corrected code in a single ```kotlin``` block.
 Do NOT include explanations or comments outside the code block."""
         
         if source_code:
+            # Include code analysis to help LLM understand what's testable
+            analysis = analyze_kotlin_code(source_code)
+            analysis_text = format_analysis_for_prompt(analysis)
+            
             repair_prompt += f"""
+
+═══════════════════════════════════════════════════════════════════
+SOURCE CODE ANALYSIS (CONSTRAINTS TO FOLLOW)
+═══════════════════════════════════════════════════════════════════
+{analysis_text if analysis_text else "No special constraints detected."}
 
 ═══════════════════════════════════════════════════════════════════
 SOURCE CODE (for reference only)

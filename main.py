@@ -214,6 +214,29 @@ def _post_process_generated_tests(code: str) -> Tuple[str, List[str], List[str]]
 
     cleaned_code = "\n".join(cleaned_lines)
 
+    # AUTO-FIX: Common annotation typos (e.g., @BeforeEachEach -> @BeforeEach)
+    annotation_fixes = [
+        (r"@BeforeEachEach\b", "@BeforeEach"),
+        (r"@BeforeEacheach\b", "@BeforeEach"),
+        (r"@Beforeeach\b", "@BeforeEach"),
+        (r"@beforeEach\b", "@BeforeEach"),
+        (r"@AfterEachEach\b", "@AfterEach"),
+        (r"@AfterEacheach\b", "@AfterEach"),
+        (r"@Aftereach\b", "@AfterEach"),
+        (r"@afterEach\b", "@AfterEach"),
+        (r"@Testt\b", "@Test"),
+        (r"@TestTest\b", "@Test"),
+        (r"@test\b", "@Test"),
+        (r"@Displayname\b", "@DisplayName"),
+        (r"@displayName\b", "@DisplayName"),
+        (r"@displayname\b", "@DisplayName"),
+        (r"@nested\b", "@Nested"),
+    ]
+    for pattern, replacement in annotation_fixes:
+        if re.search(pattern, cleaned_code):
+            cleaned_code = re.sub(pattern, replacement, cleaned_code)
+            notes.append(f"Fixed annotation typo: {pattern[1:-2]} → {replacement}")
+
     # Normalize Kotlin assert(...) calls to JUnit5 assertions where possible.
     def _replace_not(m):
         expr = m.group(1).strip()
