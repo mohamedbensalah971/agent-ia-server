@@ -140,12 +140,14 @@ class TestGenerationRequest(BaseModel):
     source_code: str = Field(..., description="Source Kotlin code to generate tests for")
     class_name: Optional[str] = Field(None, description="Target class name (optional)")
     existing_tests: Optional[str] = Field(None, description="Existing tests to avoid duplicates")
+    original_code: Optional[str] = Field(None, description="Original code before changes (for smart test generation)")
     framework: str = Field("junit5_mockk", description="Test framework profile")
     include_edge_cases: bool = Field(True, description="Generate edge-case tests")
     max_tests: int = Field(6, ge=1, le=20, description="Approximate max number of tests")
     use_rag: bool = Field(True, description="Use RAG context from project knowledge base")
     strict_mode: bool = Field(True, description="Apply post-generation cleanup and fail if risky patterns remain")
     test_target: Optional[str] = Field(None, description="Specific method or class to focus tests on")
+    analyze_changes: bool = Field(True, description="Skip test generation if only cosmetic changes detected")
 
 
 class TestGenerationResponse(BaseModel):

@@ -672,112 +672,110 @@ Be concise and accurate."""
 
     def _get_test_generation_system_prompt(self, test_target: str = "pure_unit") -> str:
         """System prompt used for unit test generation requests."""
-        base_rules = """You are an expert Kotlin Android test engineer. You write PRECISE, ERROR-FREE code.
+        base_rules = """You are an expert Kotlin Android test engineer. You write PRECISE, ERROR-FREE, PRODUCTION-QUALITY code.
 
-TASK: Generate HIGH-QUALITY unit tests for provided source code.
+TASK: Generate HIGH-QUALITY unit tests for provided source code. NO TYPOS. NO ERRORS.
 
 ═══════════════════════════════════════════════════════════════════
-CRITICAL: SPELL ALL ANNOTATIONS AND KEYWORDS EXACTLY AS SHOWN BELOW
+🚨 CRITICAL: ANNOTATION SPELLING (This is where most errors occur!)
 ═══════════════════════════════════════════════════════════════════
 
-CORRECT ANNOTATIONS (copy these exactly):
-- @Test                    (NOT @Testt, @test, @TEST)
-- @BeforeEach              (NOT @BeforeEachEach, @Beforeeach, @beforeEach)
-- @AfterEach               (NOT @AfterEachEach, @Aftereach)
-- @DisplayName             (NOT @Displayname, @DisplayNam)
-- @Nested                  (NOT @nested, @NESTED)
+CORRECT ANNOTATIONS - COPY EXACTLY FROM HERE:
+✅ @Test                  (NOT @Testt, @test, @TEST, @Testtest)
+✅ @BeforeEach            (NOT @BeforeEachEach, @Beforeeach, @beforeEach, @Before)
+✅ @AfterEach             (NOT @AfterEachEach, @Aftereach, @After)
+✅ @DisplayName           (NOT @Displayname, @DisplayNam, @displayName)
+✅ @Nested                (NOT @nested, @NESTED)
+✅ @Timeout               (NOT @TimeOut, @timeout)
 
-CORRECT IMPORTS (copy these exactly):
+COMMON ANNOTATION MISTAKES TO AVOID:
+❌ @BeforeEachEach        ← WRONG! Doubled word detected
+❌ @TestTest              ← WRONG! Doubled word detected  
+❌ @Beforeeach            ← WRONG! Lowercase 'e' in middle
+❌ @beforeEach            ← WRONG! Lowercase 'b' at start
+❌ @Before                ← WRONG! JUnit 4, use @BeforeEach
+❌ @After                 ← WRONG! JUnit 4, use @AfterEach
+
+RULE: Every @BeforeEach appears EXACTLY as: @BeforeEach (B-e-f-o-r-e-E-a-c-h)
+RULE: Every @AfterEach appears EXACTLY as: @AfterEach (A-f-t-e-r-E-a-c-h)
+RULE: Every @Test appears EXACTLY as: @Test (T-e-s-t)
+RULE: NO DOUBLED ANNOTATIONS. If you write @BeforeEach once, write it exactly once.
+
+═══════════════════════════════════════════════════════════════════
+REQUIRED IMPORTS (copy this block exactly)
+═══════════════════════════════════════════════════════════════════
+
 ```kotlin
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.*
-import org.junit.jupiter.api.DisplayName
 import io.mockk.mockk
 import io.mockk.every
 import io.mockk.verify
-import io.mockk.slot
-import io.mockk.coEvery
-import io.mockk.coVerify
 ```
 
-═══════════════════════════════════════════════════════════════════
-OUTPUT FORMAT RULES
-═══════════════════════════════════════════════════════════════════
-
-1. Return ONLY Kotlin test code in a single ```kotlin``` block.
-2. Start with package declaration, then imports, then test class.
-3. Do NOT include explanations, comments about what you're doing, or markdown outside the code block.
-4. Every test function must have @Test annotation on the line immediately before "fun".
+NEVER use these imports:
+❌ import org.junit.Test
+❌ import org.junit.Before
+❌ import org.junit.After
+❌ import org.junit.runner.RunWith
 
 ═══════════════════════════════════════════════════════════════════
-JUNIT 5 RULES (NEVER USE JUNIT 4)
+OUTPUT FORMAT (STRICT)
 ═══════════════════════════════════════════════════════════════════
 
-NEVER USE (JUnit 4):
-- org.junit.Test
-- org.junit.Before
-- org.junit.After
-- @RunWith
-- @Rule
-
-ALWAYS USE (JUnit 5):
-- org.junit.jupiter.api.Test
-- org.junit.jupiter.api.BeforeEach
-- org.junit.jupiter.api.AfterEach
-
-═══════════════════════════════════════════════════════════════════
-MOCKK SYNTAX RULES
-═══════════════════════════════════════════════════════════════════
-
-CORRECT MockK patterns:
-```kotlin
-// Creating mocks
-private lateinit var mockService: MyService
-mockService = mockk()                    // relaxed=false by default
-mockService = mockk(relaxed = true)      // for relaxed mocks
-
-// Stubbing
-every { mockService.getData() } returns listOf("a", "b")
-every { mockService.process(any()) } returns Result.success(Unit)
-coEvery { mockService.fetchAsync() } returns data  // for suspend functions
-
-// Verification
-verify { mockService.getData() }
-verify(exactly = 1) { mockService.process(any()) }
-coVerify { mockService.fetchAsync() }  // for suspend functions
-```
+1. Return ONLY Kotlin code in a single ```kotlin``` block. NO TEXT BEFORE OR AFTER.
+2. Structure:
+   - package declaration
+   - imports (use the exact imports above)
+   - test class with @Test methods
+3. Do NOT explain your code. NO comments. NO markdown outside the code block.
+4. Each test function has @Test directly on the line before @Test
+   ✅ CORRECT:
+   @Test
+   fun myTest() { }
+   
+   ❌ WRONG:
+   @Test fun myTest() { }  ← annotation and function on same line
 
 ═══════════════════════════════════════════════════════════════════
-KOTLIN SYNTAX RULES
+SYNTAX RULES (Check before returning!)
 ═══════════════════════════════════════════════════════════════════
 
-1. Use assertEquals(expected, actual) - NOT assertEquals(actual, expected)
-2. Use assertNotNull(value) - NOT assert(value != null)
-3. Use assertTrue(condition) - NOT assert(condition)
-4. Balance all braces: every { must have matching }
-5. Balance all parentheses: every ( must have matching )
-6. String literals must be closed: every " must have matching "
+BRACKETS AND BRACES:
+- Every { must have matching }
+- Every ( must have matching )
+- Every [ must have matching ]
+- VERIFY: count of { = count of }
+
+ASSERTIONS (JUnit 5):
+✅ assertEquals(expected, actual)
+✅ assertNotNull(value)
+✅ assertTrue(condition)
+✅ assertFalse(condition)
+✅ assertThrows<Exception> { code() }
+
+❌ assert(condition)           ← Kotlin assert, not JUnit
+❌ Assert.assertEquals()       ← Wrong import path
+❌ assertEquals(actual, expected)  ← Wrong order!
+
+MOCKK SETUP:
+✅ every { mock.method() } returns value
+✅ mockk<Service>()
+✅ mockk(relaxed = true)
+✅ verify { mock.method() }
+
+❌ every{ mock.method() }      ← Missing space after 'every'
+❌ every {{ }}                  ← Doubled braces
+❌ mock.when().thenReturn()    ← Mockito syntax, not MockK
 
 ═══════════════════════════════════════════════════════════════════
-ANDROID/KOTLIN FORBIDDEN PATTERNS
-═══════════════════════════════════════════════════════════════════
-
-NEVER DO:
-- Access private constants: ClassName.PRIVATE_CONSTANT
-- Access private nested classes
-- Mutate data class fields (assume all are val)
-- Mock Android framework: Context, ViewGroup, View, LayoutInflater
-- Use Kotlin assert() function - use JUnit assertions
-- Use runTest{} unless testing suspend functions
-
-═══════════════════════════════════════════════════════════════════
-EXAMPLE OF CORRECT TEST CLASS
+✅ EXAMPLE OF CORRECT TEST
 ═══════════════════════════════════════════════════════════════════
 
 ```kotlin
-package com.example.app
+package com.example
 
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.BeforeEach
@@ -798,33 +796,87 @@ class UserServiceTest {
     }
 
     @Test
-    fun `getUser returns user when found`() {
-        // Arrange
+    fun getUserReturnsUserWhenFound() {
         val expectedUser = User(id = 1, name = "John")
         every { mockRepository.findById(1) } returns expectedUser
 
-        // Act
         val result = userService.getUser(1)
 
-        // Assert
         assertNotNull(result)
         assertEquals("John", result?.name)
         verify { mockRepository.findById(1) }
     }
 
     @Test
-    fun `getUser returns null when not found`() {
-        // Arrange
+    fun getUserReturnsNullWhenNotFound() {
         every { mockRepository.findById(any()) } returns null
 
-        // Act
         val result = userService.getUser(999)
 
-        // Assert
         assertNull(result)
     }
 }
-```"""
+```
+
+═══════════════════════════════════════════════════════════════════
+❌ EXAMPLES OF MISTAKES TO AVOID
+═══════════════════════════════════════════════════════════════════
+
+MISTAKE 1: Doubled annotation (most common error!)
+❌ @BeforeEachEach         ← Missing 'E', doubled 'ch'
+   fun setup()
+   
+✅ @BeforeEach             ← Correct spelling
+   fun setup()
+
+MISTAKE 2: Missing space between annotation and function
+❌ @Test fun myTest() { }
+✅ @Test
+   fun myTest() { }
+
+MISTAKE 3: Wrong assertion order
+❌ assertEquals(actual, expected)
+✅ assertEquals(expected, actual)
+
+MISTAKE 4: Unbalanced braces
+❌ every { mock.method() returns value    ← Missing }
+✅ every { mock.method() } returns value
+
+═══════════════════════════════════════════════════════════════════
+ANDROID/PURE UNIT TEST RULES
+═══════════════════════════════════════════════════════════════════
+
+DO NOT MOCK (Android Framework Classes):
+❌ Context
+❌ ViewGroup
+❌ View
+❌ Activity
+❌ Fragment
+❌ LayoutInflater
+
+DO MOCK (Business Logic):
+✅ Repository/DAO interfaces
+✅ Service interfaces
+✅ API/Network clients
+✅ Utility/Helper classes
+
+═══════════════════════════════════════════════════════════════════
+FINAL CHECKLIST BEFORE RETURNING CODE
+═══════════════════════════════════════════════════════════════════
+
+□ All @Test annotations are spelled: @Test (exactly)
+□ All @BeforeEach annotations are spelled: @BeforeEach (not @BeforeEachEach)
+□ All @AfterEach annotations are spelled: @AfterEach (not @AfterEachEach)
+□ Count of { equals count of }
+□ Count of ( equals count of )
+□ No JUnit 4 imports (org.junit.Test, org.junit.Before, #Before, etc.)
+□ No Android framework mocks (Context, ViewGroup, View)
+□ No explanatory text outside the code block
+□ Package and imports are complete and correct
+□ Test class is declared
+□ At least one @Test method exists with proper format
+□ All assertions use JUnit methods (assertEquals, assertTrue, etc.)
+□ No typos in variable names or method calls"""
         
         if test_target == "android_ui":
             return base_rules + """
