@@ -443,7 +443,7 @@ class GroqClient:
         source_code: str,
         class_name: Optional[str] = None,
         existing_tests: Optional[str] = None,
-        framework: str = "junit5_mockk",
+        framework: str = "junit4_mockito",
         include_edge_cases: bool = True,
         max_tests: int = 6,
         rag_context: Optional[str] = None,

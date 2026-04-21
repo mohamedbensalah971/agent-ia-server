@@ -1,0 +1,27 @@
+# ======================================
+# AGENT IA SERVER - CORE DEPENDENCIES
+# ======================================
+
+# Web Framework
+fastapi==0.135.3
+uvicorn[standard]==0.35.0
+pydantic>=2.0,<4.0
+pydantic-settings>=2.1
+python-multipart==0.0.6
+
+# LLM Clients
+groq==0.4.2
+httpx>=0.27
+
+# Utilities
+python-dotenv==1.0.0
+gitpython==3.1.41
+loguru==0.7.2
+
+# Testing
+pytest==7.4.4
+pytest-asyncio==0.23.3
+
+# RAG dependencies (simplified)
+langchain-core==0.3.84
+cachetools==5.3.2

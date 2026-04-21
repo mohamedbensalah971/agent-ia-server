@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     JENKINS_URL: Optional[str] = None
     JENKINS_USERNAME: Optional[str] = None
     JENKINS_TOKEN: Optional[str] = None
+    TEST_COVERAGE_THRESHOLD: float = 80.0
     
     # Cache Configuration
     CACHE_ENABLED: bool = True

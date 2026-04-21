@@ -141,10 +141,10 @@ class TestGenerationRequest(BaseModel):
     class_name: Optional[str] = Field(None, description="Target class name (optional)")
     existing_tests: Optional[str] = Field(None, description="Existing tests to avoid duplicates")
     original_code: Optional[str] = Field(None, description="Original code before changes (for smart test generation)")
-    framework: str = Field("junit5_mockk", description="Test framework profile")
+    framework: str = Field("junit4_mockito", description="Test framework profile")
     include_edge_cases: bool = Field(True, description="Generate edge-case tests")
     max_tests: int = Field(6, ge=1, le=20, description="Approximate max number of tests")
-    use_rag: bool = Field(True, description="Use RAG context from project knowledge base")
+    use_rag: bool = Field(settings.RAG_ENABLED, description="Use RAG context from project knowledge base")
     strict_mode: bool = Field(True, description="Apply post-generation cleanup and fail if risky patterns remain")
     test_target: Optional[str] = Field(None, description="Specific method or class to focus tests on")
     analyze_changes: bool = Field(True, description="Skip test generation if only cosmetic changes detected")
@@ -162,6 +162,21 @@ class TestGenerationResponse(BaseModel):
     quality_notes: Optional[List[str]] = None
     error: Optional[str] = None
     rate_limit_exceeded: Optional[bool] = False
+    timestamp: datetime = Field(default_factory=datetime.now)
+
+
+class JenkinsWorkflowResponse(BaseModel):
+    """Response model for Jenkins webhook workflow handling."""
+    success: bool
+    action_taken: str
+    message: str
+    correction_id: Optional[str] = None
+    generation_id: Optional[str] = None
+    corrected_code: Optional[str] = None
+    generated_tests: Optional[str] = None
+    quality_notes: Optional[List[str]] = None
+    coverage_percent: Optional[float] = None
+    coverage_threshold: float = Field(default_factory=lambda: settings.TEST_COVERAGE_THRESHOLD)
     timestamp: datetime = Field(default_factory=datetime.now)
 
 
@@ -268,10 +283,18 @@ def _post_process_generated_tests(code: str) -> Tuple[str, List[str], List[str]]
 
     # 2. Private member/constant access (ClassName.CONSTANT or CompanionObject patterns)
     # Pattern: IdentifierWithNumbers.UPPERCASE_NAME (typical private constant pattern)
-    private_constant_access = re.findall(r"\b([A-Z][a-zA-Z0-9]*)\.[A-Z_]+\s*(?:=|,|\)|:|@|\s*\n)", cleaned_code)
+    private_constant_access = re.findall(r"\b([A-Z][a-zA-Z0-9_]*)\.([A-Z][A-Z0-9_]*)\b", cleaned_code)
+    allowed_owners = {"Calendar", "TimeUnit", "Locale", "Date", "System"}
+    allowed_constants = {"DAY_OF_YEAR", "HOUR", "HOURS", "MINUTE", "MINUTES", "SECOND", "SECONDS"}
+
     if private_constant_access:
-        for match in set(private_constant_access):
-            unresolved_issues.append(f"Possible private constant access: {match}.CONSTANT_NAME (should test public behavior instead)")
+        for owner, const in set(private_constant_access):
+            if owner in allowed_owners or const in allowed_constants:
+                continue
+            if const.startswith("VIEW_TYPE_") or const.startswith("TYPE_") or const.endswith("_ID"):
+                unresolved_issues.append(
+                    f"Possible private constant access: {owner}.{const} (should test public behavior instead)"
+                )
 
     # 3. Immutable field mutations (pattern: variable.field = value where variable looks like a model)
     field_mutations = re.findall(r"([a-z_][a-zA-Z0-9]*)\.[a-z_][a-zA-Z0-9]*\s*=\s*(?!\.)", cleaned_code)
@@ -333,11 +356,14 @@ async def startup_event():
         # Check LangGraph availability
         if LANGGRAPH_AVAILABLE:
             logger.info("✅ LangGraph workflow available")
-            from rag_system.retriever import get_rag_retriever
+            if settings.RAG_ENABLED:
+                from rag_system.retriever import get_rag_retriever
 
-            logger.info("🔥 Warming LangGraph + RAG components...")
-            create_workflow(settings.GROQ_API_KEY)
-            get_rag_retriever().warmup()
+                logger.info("🔥 Warming LangGraph + RAG components...")
+                create_workflow(settings.GROQ_API_KEY)
+                get_rag_retriever().warmup()
+            else:
+                logger.info("ℹ️ RAG disabled by config (RAG_ENABLED=false), skipping RAG warmup")
         else:
             logger.warning("⚠️ LangGraph not installed - only basic endpoint available")
         
@@ -488,7 +514,7 @@ async def generate_tests(request: TestGenerationRequest):
 
         rag_context_text = None
         rag_context_used = False
-        if request.use_rag:
+        if request.use_rag and settings.RAG_ENABLED:
             try:
                 from rag_system.retriever import get_rag_retriever
 
@@ -502,6 +528,8 @@ async def generate_tests(request: TestGenerationRequest):
                 rag_context_used = bool((rag_context_text or "").strip())
             except Exception as e:
                 logger.warning(f"⚠️ RAG context unavailable for test generation, continuing without it: {e}")
+        elif request.use_rag and not settings.RAG_ENABLED:
+            logger.info("ℹ️ Request asked for RAG, but RAG is disabled in server config")
 
         result = groq_client.generate_unit_tests(
             source_code=request.source_code,
@@ -799,14 +827,110 @@ async def jenkins_webhook(payload: Dict[Any, Any]):
     """
     logger.info("🔔 Jenkins webhook received")
     logger.debug(f"Payload: {payload}")
-    
-    # TODO: Phase 4 - Parse Jenkins payload and trigger analysis
-    
-    return {
-        "success": True,
-        "message": "Webhook received. Analysis will be triggered.",
-        "received_at": datetime.now().isoformat()
-    }
+
+    try:
+        groq_client = get_groq_client()
+
+        build_status = str(payload.get("build_status") or payload.get("status") or "").lower()
+        coverage_percent = payload.get("coverage_percent")
+        if coverage_percent is None:
+            coverage_percent = payload.get("coverage")
+        try:
+            coverage_percent = float(coverage_percent) if coverage_percent is not None else None
+        except (TypeError, ValueError):
+            coverage_percent = None
+
+        source_code = payload.get("source_code")
+        source_file = payload.get("source_file") or payload.get("sourceFile") or "unknown"
+        class_name = payload.get("class_name") or payload.get("className")
+        existing_tests = payload.get("existing_tests") or payload.get("existingTests")
+        test_target = payload.get("test_target") or payload.get("testTarget") or "pure_unit"
+        test_file = payload.get("test_file") or payload.get("testFile")
+        test_name = payload.get("test_name") or payload.get("testName") or "unknown_test"
+        test_code = payload.get("test_code") or payload.get("testCode")
+        error_logs = payload.get("error_logs") or payload.get("errorLogs") or ""
+
+        if build_status in {"failed", "failure", "unstable"} and test_code and error_logs:
+            logger.info("🛠️ Jenkins reported failing tests; generating correction")
+            result = groq_client.generate_correction(
+                test_code=test_code,
+                error_logs=error_logs,
+                source_code=source_code,
+                context=payload.get("context"),
+            )
+
+            if not result.get("success"):
+                return JenkinsWorkflowResponse(
+                    success=False,
+                    action_taken="analyze_failure",
+                    message=result.get("error", "Correction generation failed"),
+                    coverage_percent=coverage_percent,
+                )
+
+            correction_id = f"jenkins_corr_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            _pending_corrections[correction_id] = {
+                "test_code": test_code,
+                "fix_code": result.get("corrected_code", ""),
+                "error_type": None,
+                "error_message": error_logs[:300],
+                "test_file": test_file or source_file,
+                "confidence_score": result.get("confidence", 0.0),
+            }
+
+            return JenkinsWorkflowResponse(
+                success=True,
+                action_taken="correct_failed_test",
+                message="Correction generated from Jenkins failure report",
+                correction_id=correction_id,
+                corrected_code=result.get("corrected_code"),
+                quality_notes=[result.get("explanation")] if result.get("explanation") else None,
+                coverage_percent=coverage_percent,
+            )
+
+        if coverage_percent is not None and coverage_percent < settings.TEST_COVERAGE_THRESHOLD and source_code:
+            logger.info(
+                f"📉 Jenkins coverage below threshold ({coverage_percent}% < {settings.TEST_COVERAGE_THRESHOLD}%), generating more tests"
+            )
+            result = groq_client.generate_unit_tests(
+                source_code=source_code,
+                class_name=class_name,
+                existing_tests=existing_tests,
+                framework=payload.get("framework", "junit5_mockk"),
+                include_edge_cases=True,
+                max_tests=int(payload.get("max_tests", 6)),
+                rag_context=payload.get("rag_context"),
+                test_target=test_target,
+            )
+
+            if not result.get("success"):
+                return JenkinsWorkflowResponse(
+                    success=False,
+                    action_taken="generate_tests",
+                    message=result.get("error", "Test generation failed"),
+                    coverage_percent=coverage_percent,
+                )
+
+            generation_id = f"jenkins_gen_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            return JenkinsWorkflowResponse(
+                success=True,
+                action_taken="generate_additional_tests",
+                message="Generated additional tests because coverage is below threshold",
+                generation_id=generation_id,
+                generated_tests=result.get("generated_tests"),
+                quality_notes=result.get("validation_errors") or [],
+                coverage_percent=coverage_percent,
+            )
+
+        return JenkinsWorkflowResponse(
+            success=True,
+            action_taken="no_action_needed",
+            message="Build is healthy and coverage meets threshold",
+            coverage_percent=coverage_percent,
+        )
+
+    except Exception as e:
+        logger.error(f"❌ Jenkins webhook failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ==========================================
