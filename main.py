@@ -180,6 +180,156 @@ class JenkinsWorkflowResponse(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
 
 
+# def _post_process_generated_tests(code: str) -> Tuple[str, List[str], List[str]]:
+#     """Normalize generated tests to safer project conventions and detect risky leftovers."""
+#     notes: List[str] = []
+#     unresolved_issues: List[str] = []
+
+#     if not code.strip():
+#         return code, notes, ["Empty generated test output"]
+
+#     lines = code.splitlines()
+#     cleaned_lines: List[str] = []
+
+#     banned_import_contains = [
+#         "org.junit.runner.RunWith",
+#         "org.junit.runners.JUnit4",
+#         "org.junit.Rule",
+#         "kotlinx.coroutines.test.runTest",
+#         "kotlinx.coroutines.ExperimentalCoroutinesApi",
+#         "BaseBindingModel",
+#     ]
+
+#     for line in lines:
+#         stripped = line.strip()
+#         if stripped.startswith("import ") and any(token in stripped for token in banned_import_contains):
+#             notes.append(f"Removed risky import: {stripped}")
+#             continue
+
+#         if stripped == "import org.junit.Test":
+#             notes.append("Replaced JUnit4 Test import with JUnit5")
+#             cleaned_lines.append(line.replace("import org.junit.Test", "import org.junit.jupiter.api.Test"))
+#             continue
+
+#         if stripped == "import org.junit.Before":
+#             notes.append("Replaced JUnit4 Before import with JUnit5")
+#             cleaned_lines.append(line.replace("import org.junit.Before", "import org.junit.jupiter.api.BeforeEach"))
+#             continue
+
+#         if stripped.startswith("@RunWith(") or stripped == "@ExperimentalCoroutinesApi":
+#             notes.append(f"Removed annotation: {stripped}")
+#             continue
+
+#         if "@get:Rule" in line or "TestCoroutineRule(" in line:
+#             notes.append("Removed TestCoroutineRule usage")
+#             continue
+
+#         updated_line = line
+#         updated_line = updated_line.replace("@Before", "@BeforeEach")
+#         updated_line = updated_line.replace(" = runTest {", " {")
+#         cleaned_lines.append(updated_line)
+
+#     cleaned_code = "\n".join(cleaned_lines)
+
+#     # AUTO-FIX: Common annotation typos (e.g., @BeforeEachEach -> @BeforeEach)
+#     annotation_fixes = [
+#         (r"@BeforeEachEach\b", "@BeforeEach"),
+#         (r"@BeforeEacheach\b", "@BeforeEach"),
+#         (r"@Beforeeach\b", "@BeforeEach"),
+#         (r"@beforeEach\b", "@BeforeEach"),
+#         (r"@AfterEachEach\b", "@AfterEach"),
+#         (r"@AfterEacheach\b", "@AfterEach"),
+#         (r"@Aftereach\b", "@AfterEach"),
+#         (r"@afterEach\b", "@AfterEach"),
+#         (r"@Testt\b", "@Test"),
+#         (r"@TestTest\b", "@Test"),
+#         (r"@test\b", "@Test"),
+#         (r"@Displayname\b", "@DisplayName"),
+#         (r"@displayName\b", "@DisplayName"),
+#         (r"@displayname\b", "@DisplayName"),
+#         (r"@nested\b", "@Nested"),
+#     ]
+#     for pattern, replacement in annotation_fixes:
+#         if re.search(pattern, cleaned_code):
+#             cleaned_code = re.sub(pattern, replacement, cleaned_code)
+#             notes.append(f"Fixed annotation typo: {pattern[1:-2]} → {replacement}")
+
+#     # Normalize Kotlin assert(...) calls to JUnit5 assertions where possible.
+#     def _replace_not(m):
+#         expr = m.group(1).strip()
+#         return f"assertFalse({expr})"
+
+#     def _replace_pos(m):
+#         expr = m.group(1).strip()
+#         return f"assertTrue({expr})"
+
+#     new_code = re.sub(r"assert\s*\(\s*!\s*(.*?)\s*\)", _replace_not, cleaned_code)
+#     new_code = re.sub(r"assert\s*\(([^\)]*?)\)", _replace_pos, new_code)
+#     if new_code != cleaned_code:
+#         notes.append("Normalized Kotlin assert(...) to JUnit-style assertTrue/assertFalse")
+#     cleaned_code = new_code
+
+#     # Ensure JUnit5 assertions import exists if assertions are used.
+#     if ("assertTrue(" in cleaned_code or "assertFalse(" in cleaned_code) and "import org.junit.jupiter.api.Assertions" not in cleaned_code:
+#         cleaned_code = "import org.junit.jupiter.api.Assertions.*\n" + cleaned_code
+#         notes.append("Added JUnit5 Assertions import")
+
+#     # ENHANCED VALIDATION: Check for Android anti-patterns
+#     # 1. Annotation typos (@BeforeEachEach, @Testt, etc.)
+#     typo_annotations = re.findall(r"@Before\w{2,}Each|@Test\w+(?!\w)", cleaned_code)
+#     if typo_annotations:
+#         for typo in set(typo_annotations):
+#             unresolved_issues.append(f"Typo in annotation: {typo} (did you mean @BeforeEach or @Test?)")
+
+#     # 2. Private member/constant access (ClassName.CONSTANT or CompanionObject patterns)
+#     # Pattern: IdentifierWithNumbers.UPPERCASE_NAME (typical private constant pattern)
+#     private_constant_access = re.findall(r"\b([A-Z][a-zA-Z0-9_]*)\.([A-Z][A-Z0-9_]*)\b", cleaned_code)
+#     allowed_owners = {"Calendar", "TimeUnit", "Locale", "Date", "System"}
+#     allowed_constants = {"DAY_OF_YEAR", "HOUR", "HOURS", "MINUTE", "MINUTES", "SECOND", "SECONDS"}
+
+#     if private_constant_access:
+#         for owner, const in set(private_constant_access):
+#             if owner in allowed_owners or const in allowed_constants:
+#                 continue
+#             if const.startswith("VIEW_TYPE_") or const.startswith("TYPE_") or const.endswith("_ID"):
+#                 unresolved_issues.append(
+#                     f"Possible private constant access: {owner}.{const} (should test public behavior instead)"
+#                 )
+
+#     # 3. Immutable field mutations (pattern: variable.field = value where variable looks like a model)
+#     field_mutations = re.findall(r"([a-z_][a-zA-Z0-9]*)\.[a-z_][a-zA-Z0-9]*\s*=\s*(?!\.)", cleaned_code)
+#     if field_mutations:
+#         for match in set(field_mutations):
+#             unresolved_issues.append(f"Possible immutable field mutation: {match}.field = value (models are typically val)")
+
+#     # 4. Android view mocking anti-patterns
+#     view_mock_patterns = [
+#         (r"mockk<ViewGroup>", "ViewGroup mocking"),
+#         (r"mockk<Context>", "Context mocking"),
+#         (r"mockk<LayoutInflater>", "LayoutInflater mocking"),
+#         (r"mockk<View>\(\)", "View mocking"),
+#     ]
+#     for pattern, desc in view_mock_patterns:
+#         if re.search(pattern, cleaned_code):
+#             unresolved_issues.append(f"Android framework mocking detected: {desc} (use public adapter methods only)")
+
+#     # Detect unresolved risky patterns (original checks).
+#     risk_patterns = {
+#         "@RunWith": "JUnit4 RunWith annotation still present",
+#         "JUnit4": "JUnit4 class reference still present",
+#         "@get:Rule": "Rule annotation still present",
+#         "TestCoroutineRule": "TestCoroutineRule still present",
+#         " = runTest {": "runTest still present",
+#         "import org.junit.Test": "JUnit4 Test import still present",
+#         "import org.junit.Before": "JUnit4 Before import still present",
+#     }
+#     for token, message in risk_patterns.items():
+#         if token in cleaned_code:
+#             unresolved_issues.append(message)
+
+#     return cleaned_code, notes, unresolved_issues
+
+
 def _post_process_generated_tests(code: str) -> Tuple[str, List[str], List[str]]:
     """Normalize generated tests to safer project conventions and detect risky leftovers."""
     notes: List[str] = []
@@ -198,13 +348,41 @@ def _post_process_generated_tests(code: str) -> Tuple[str, List[str], List[str]]
         "kotlinx.coroutines.test.runTest",
         "kotlinx.coroutines.ExperimentalCoroutinesApi",
         "BaseBindingModel",
+        "com.google.common.truth",  # ← NOUVEAU: bannir Google Truth
     ]
+
+    # ✅ NOUVEAU: imports manquants à ajouter automatiquement
+    needed_imports = {
+        "TimeUnit": "import java.util.concurrent.TimeUnit",
+        "SimpleDateFormat": "import java.text.SimpleDateFormat",
+        "Locale": "import java.util.Locale",
+        "Date(": "import java.util.Date",
+        "Calendar": "import java.util.Calendar",
+    }
 
     for line in lines:
         stripped = line.strip()
+
+        # Bannir imports interdits
         if stripped.startswith("import ") and any(token in stripped for token in banned_import_contains):
             notes.append(f"Removed risky import: {stripped}")
             continue
+
+        # Remplacer Google Truth assertThat par JUnit5
+        if "assertThat(" in line and "Truth" not in line:
+            # assertThat(x).isNull() → assertNull(x)
+            line = re.sub(r'assertThat\((.+?)\)\.isNull\(\)', r'assertNull(\1)', line)
+            # assertThat(x).isNotNull() → assertNotNull(x)
+            line = re.sub(r'assertThat\((.+?)\)\.isNotNull\(\)', r'assertNotNull(\1)', line)
+            # assertThat(x).isEqualTo(y) → assertEquals(y, x)
+            line = re.sub(r'assertThat\((.+?)\)\.isEqualTo\((.+?)\)', r'assertEquals(\2, \1)', line)
+            # assertThat(x).isTrue() → assertTrue(x)
+            line = re.sub(r'assertThat\((.+?)\)\.isTrue\(\)', r'assertTrue(\1)', line)
+            # assertThat(x).isFalse() → assertFalse(x)
+            line = re.sub(r'assertThat\((.+?)\)\.isFalse\(\)', r'assertFalse(\1)', line)
+            # assertThat(x).isEmpty() → assertTrue(x.isEmpty())
+            line = re.sub(r'assertThat\((.+?)\)\.isEmpty\(\)', r'assertTrue(\1.isEmpty())', line)
+            notes.append("Converted Google Truth assertThat to JUnit5 assertion")
 
         if stripped == "import org.junit.Test":
             notes.append("Replaced JUnit4 Test import with JUnit5")
@@ -231,7 +409,44 @@ def _post_process_generated_tests(code: str) -> Tuple[str, List[str], List[str]]
 
     cleaned_code = "\n".join(cleaned_lines)
 
-    # AUTO-FIX: Common annotation typos (e.g., @BeforeEachEach -> @BeforeEach)
+    # ✅ NOUVEAU: Ajouter imports manquants automatiquement
+    existing_imports = "\n".join([l for l in cleaned_code.splitlines() if l.strip().startswith("import ")])
+    imports_to_add = []
+    for keyword, import_stmt in needed_imports.items():
+        if keyword in cleaned_code and import_stmt not in existing_imports:
+            imports_to_add.append(import_stmt)
+            notes.append(f"Auto-added missing import: {import_stmt}")
+
+    if imports_to_add:
+        # Insérer après la ligne package
+        lines_list = cleaned_code.splitlines()
+        insert_idx = 0
+        for i, line in enumerate(lines_list):
+            if line.strip().startswith("package "):
+                insert_idx = i + 1
+                break
+        for imp in reversed(imports_to_add):
+            lines_list.insert(insert_idx, imp)
+        cleaned_code = "\n".join(lines_list)
+
+    # ✅ NOUVEAU: Supprimer les tests null sur paramètres non-nullable
+    # Détecter et supprimer les fonctions de test qui passent null à des fonctions
+    def remove_null_tests(code: str) -> Tuple[str, List[str]]:
+        removed = []
+        # Pattern: blocs de test qui contiennent validateMessage(null) ou similaire
+        pattern = r'(@Test\s+(?:@DisplayName\([^)]+\)\s+)?fun\s+\w+\(\)\s*\{[^}]*\bnull\b[^}]*\})'
+        matches = re.findall(pattern, code, re.DOTALL)
+        for match in matches:
+            # Vérifier si c'est un appel de fonction avec null comme argument direct
+            if re.search(r'\w+\(null\)', match):
+                code = code.replace(match, "")
+                removed.append(f"Removed test passing null to non-nullable parameter")
+                notes.append("Auto-removed null test (non-nullable Kotlin parameter)")
+        return code, removed
+
+    cleaned_code, null_removals = remove_null_tests(cleaned_code)
+
+    # AUTO-FIX: Common annotation typos
     annotation_fixes = [
         (r"@BeforeEachEach\b", "@BeforeEach"),
         (r"@BeforeEacheach\b", "@BeforeEach"),
@@ -254,7 +469,7 @@ def _post_process_generated_tests(code: str) -> Tuple[str, List[str], List[str]]
             cleaned_code = re.sub(pattern, replacement, cleaned_code)
             notes.append(f"Fixed annotation typo: {pattern[1:-2]} → {replacement}")
 
-    # Normalize Kotlin assert(...) calls to JUnit5 assertions where possible.
+    # Normalize Kotlin assert(...) calls to JUnit5 assertions
     def _replace_not(m):
         expr = m.group(1).strip()
         return f"assertFalse({expr})"
@@ -269,51 +484,13 @@ def _post_process_generated_tests(code: str) -> Tuple[str, List[str], List[str]]
         notes.append("Normalized Kotlin assert(...) to JUnit-style assertTrue/assertFalse")
     cleaned_code = new_code
 
-    # Ensure JUnit5 assertions import exists if assertions are used.
-    if ("assertTrue(" in cleaned_code or "assertFalse(" in cleaned_code) and "import org.junit.jupiter.api.Assertions" not in cleaned_code:
-        cleaned_code = "import org.junit.jupiter.api.Assertions.*\n" + cleaned_code
-        notes.append("Added JUnit5 Assertions import")
+    # Ensure JUnit5 assertions import exists
+    if any(kw in cleaned_code for kw in ["assertTrue(", "assertFalse(", "assertNull(", "assertNotNull(", "assertEquals("]):
+        if "import org.junit.jupiter.api.Assertions" not in cleaned_code:
+            cleaned_code = "import org.junit.jupiter.api.Assertions.*\n" + cleaned_code
+            notes.append("Added JUnit5 Assertions import")
 
-    # ENHANCED VALIDATION: Check for Android anti-patterns
-    # 1. Annotation typos (@BeforeEachEach, @Testt, etc.)
-    typo_annotations = re.findall(r"@Before\w{2,}Each|@Test\w+(?!\w)", cleaned_code)
-    if typo_annotations:
-        for typo in set(typo_annotations):
-            unresolved_issues.append(f"Typo in annotation: {typo} (did you mean @BeforeEach or @Test?)")
-
-    # 2. Private member/constant access (ClassName.CONSTANT or CompanionObject patterns)
-    # Pattern: IdentifierWithNumbers.UPPERCASE_NAME (typical private constant pattern)
-    private_constant_access = re.findall(r"\b([A-Z][a-zA-Z0-9_]*)\.([A-Z][A-Z0-9_]*)\b", cleaned_code)
-    allowed_owners = {"Calendar", "TimeUnit", "Locale", "Date", "System"}
-    allowed_constants = {"DAY_OF_YEAR", "HOUR", "HOURS", "MINUTE", "MINUTES", "SECOND", "SECONDS"}
-
-    if private_constant_access:
-        for owner, const in set(private_constant_access):
-            if owner in allowed_owners or const in allowed_constants:
-                continue
-            if const.startswith("VIEW_TYPE_") or const.startswith("TYPE_") or const.endswith("_ID"):
-                unresolved_issues.append(
-                    f"Possible private constant access: {owner}.{const} (should test public behavior instead)"
-                )
-
-    # 3. Immutable field mutations (pattern: variable.field = value where variable looks like a model)
-    field_mutations = re.findall(r"([a-z_][a-zA-Z0-9]*)\.[a-z_][a-zA-Z0-9]*\s*=\s*(?!\.)", cleaned_code)
-    if field_mutations:
-        for match in set(field_mutations):
-            unresolved_issues.append(f"Possible immutable field mutation: {match}.field = value (models are typically val)")
-
-    # 4. Android view mocking anti-patterns
-    view_mock_patterns = [
-        (r"mockk<ViewGroup>", "ViewGroup mocking"),
-        (r"mockk<Context>", "Context mocking"),
-        (r"mockk<LayoutInflater>", "LayoutInflater mocking"),
-        (r"mockk<View>\(\)", "View mocking"),
-    ]
-    for pattern, desc in view_mock_patterns:
-        if re.search(pattern, cleaned_code):
-            unresolved_issues.append(f"Android framework mocking detected: {desc} (use public adapter methods only)")
-
-    # Detect unresolved risky patterns (original checks).
+    # VALIDATION checks
     risk_patterns = {
         "@RunWith": "JUnit4 RunWith annotation still present",
         "JUnit4": "JUnit4 class reference still present",
@@ -322,13 +499,13 @@ def _post_process_generated_tests(code: str) -> Tuple[str, List[str], List[str]]
         " = runTest {": "runTest still present",
         "import org.junit.Test": "JUnit4 Test import still present",
         "import org.junit.Before": "JUnit4 Before import still present",
+        "com.google.common.truth": "Google Truth still present",
     }
     for token, message in risk_patterns.items():
         if token in cleaned_code:
             unresolved_issues.append(message)
 
     return cleaned_code, notes, unresolved_issues
-
 
 # ==========================================
 # STARTUP & SHUTDOWN

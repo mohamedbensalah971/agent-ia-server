@@ -758,7 +758,27 @@ ASSERTIONS (JUnit 5):
 
 ❌ assert(condition)           ← Kotlin assert, not JUnit
 ❌ Assert.assertEquals()       ← Wrong import path
-❌ assertEquals(actual, expected)  ← Wrong order!
+        ❌ assertEquals(actual, expected)  ← Wrong order!
+
+        NULL SAFETY (CRITICAL for Kotlin!):
+        ❌ validateMessage(null)     ← If function takes String (non-nullable), this won't compile!
+        ✅ validateMessage("")       ← Use empty string to test empty input
+        ✅ validateMessage("   ")    ← Use spaces to test blank input
+
+        Only pass null if the function signature uses String? (nullable):
+        fun validateMessage(input: String?) → null is OK
+        fun validateMessage(input: String)  → null is FORBIDDEN, use "" instead
+
+        FORBIDDEN LIBRARIES (not in dependencies):
+        ❌ import com.google.common.truth.Truth.assertThat  ← Google Truth not available
+        ✅ import org.junit.jupiter.api.Assertions.*        ← Use JUnit5 always
+
+        REQUIRED JAVA IMPORTS (add when needed):
+        ✅ import java.util.concurrent.TimeUnit    ← When using TimeUnit.MINUTES, etc.
+        ✅ import java.text.SimpleDateFormat       ← When using SimpleDateFormat
+        ✅ import java.util.Locale                 ← When using Locale.getDefault(), etc.
+        ✅ import java.util.Date                   ← When using Date(timestamp)
+        ✅ import java.util.Calendar               ← When using Calendar.getInstance()
 
 MOCKK SETUP:
 ✅ every { mock.method() } returns value
@@ -875,8 +895,14 @@ FINAL CHECKLIST BEFORE RETURNING CODE
 □ Package and imports are complete and correct
 □ Test class is declared
 □ At least one @Test method exists with proper format
-□ All assertions use JUnit methods (assertEquals, assertTrue, etc.)
-□ No typos in variable names or method calls"""
+        □ All assertions use JUnit methods (assertEquals, assertTrue, etc.)
+        □ Using assertEquals(expected, actual) not assertEquals(actual, expected)
+        □ Never pass null to non-nullable String parameters (use String? if nullable needed)
+        □ Never use Google Truth (com.google.common.truth) - use JUnit5 Assertions.*
+        □ Always import java.util.concurrent.TimeUnit if TimeUnit is used
+        □ Always import java.text.SimpleDateFormat if SimpleDateFormat is used
+        □ Always import java.util.Locale if Locale is used
+        □ No typos in variable names or method calls"""
         
         if test_target == "android_ui":
             return base_rules + """
@@ -985,6 +1011,12 @@ PURE_UNIT TEST SPECIFIC RULES (default)
             "□ No private constants or nested classes accessed",
             "□ No Android framework mocks (Context, View, ViewGroup)",
             "□ Using assertEquals(expected, actual) not assertEquals(actual, expected)",
+            "□ NEVER pass null to non-nullable String parameter (check source signature first!)",
+            "□ NEVER use Google Truth - use JUnit5 Assertions.* only",
+            "□ If using TimeUnit → add: import java.util.concurrent.TimeUnit",
+            "□ If using SimpleDateFormat → add: import java.text.SimpleDateFormat",
+            "□ If using Locale → add: import java.util.Locale",
+            "□ If using Date → add: import java.util.Date",
             "",
             "═══════════════════════════════════════════════════════════════════",
             "OUTPUT",
@@ -1213,6 +1245,8 @@ PURE_UNIT TEST SPECIFIC RULES (default)
         # FORBIDDEN PATTERNS
         # ═══════════════════════════════════════════════════════════════════
         
+        
+
         # Using Kotlin assert() instead of JUnit assertions
         if re.search(r'\bassert\s*\(', code) and 'assertEquals' not in code:
             errors.append("Using Kotlin 'assert()' - use JUnit assertions (assertEquals, assertTrue, etc.)")
@@ -1239,6 +1273,49 @@ PURE_UNIT TEST SPECIFIC RULES (default)
         for pattern, message in android_mock_patterns:
             if re.search(pattern, code):
                 errors.append(message)
+
+        # ═══════════════════════════════════════════════════════════════════
+        # NULL SAFETY VALIDATION (Kotlin non-nullable types)
+        # ═══════════════════════════════════════════════════════════════════
+
+        # Detect tests passing null to functions
+        null_calls = re.findall(r'\w+\(null\)', code)
+        if null_calls:
+            if source_code:
+                # Check if the function signature accepts nullable (?)
+                for call in null_calls:
+                    func_name = call.split('(')[0]
+                    # Look for function in source that takes non-nullable String
+                    pattern = rf'fun\s+{func_name}\s*\(\s*\w+\s*:\s*String[^?]'
+                    if re.search(pattern, source_code):
+                        errors.append(
+                            f"NULL SAFETY: '{call}' passes null to non-nullable String parameter. "
+                            f"Remove this test or change parameter type to String? in source."
+                        )
+            else:
+                errors.append(
+                    f"NULL SAFETY: Detected null passed to function: {null_calls}. "
+                    f"Verify the function accepts nullable type (String?) before using null."
+                )
+
+        # Detect Google Truth imports
+        if "com.google.common.truth" in code:
+            errors.append(
+                "FORBIDDEN IMPORT: 'com.google.common.truth.Truth' (Google Truth) is not in dependencies. "
+                "Use JUnit5 Assertions instead: assertEquals, assertNull, assertTrue, etc."
+            )
+
+        # Detect missing java.util imports
+        java_util_needed = {
+            "TimeUnit": "import java.util.concurrent.TimeUnit",
+            "SimpleDateFormat": "import java.text.SimpleDateFormat",
+            "Locale": "import java.util.Locale",
+        }
+        for keyword, needed_import in java_util_needed.items():
+            if keyword in code and needed_import not in code:
+                errors.append(
+                    f"MISSING IMPORT: '{keyword}' used but '{needed_import}' not imported."
+                )
         
         # ═══════════════════════════════════════════════════════════════════
         # MOCKK SYNTAX VALIDATION
